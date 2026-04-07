@@ -1,0 +1,12 @@
+func i32 sumArray() {
+  arr: i32[5] = [10, 20, 30, 40, 45];
+  total: i32 = 0;
+  for (i: i32 = 0; i < 5; i++) {
+    total = total + arr[i];
+  }
+  return total;
+}
+
+func i32 start() {
+  return sumArray(); // expect ret i32 145
+}

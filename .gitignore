@@ -1,0 +1,14 @@
+# Build
+build/
+*.o
+*.a
+output.o
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Compiler output
+*.ll
+*.s

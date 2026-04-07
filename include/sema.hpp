@@ -1,0 +1,279 @@
+#pragma once
+
+#pragma once
+
+#include <ast.hpp>
+#include <elpc/elpc.hpp>
+#include <optional>
+#include <string>
+
+class SemanticAnalyzer : public elpc::Sema, public AST::ASTVisitor {
+  // Symbol table tracks the *types* of variables in scope
+  elpc::SymbolTable<std::string, TokenType> symbols;
+
+  // Tracks the inferred type of the currently evaluated expression
+  std::optional<TokenType> currentExprType;
+
+  // Tracks the return type of the function we are currently analyzing
+  std::optional<TokenType> currentExpectedReturnType;
+
+  struct FuncSignature {
+    TokenType retType;
+    std::vector<TokenType> paramTypes;
+  };
+  std::unordered_map<std::string, FuncSignature> functions;
+
+  struct ArrayInfo {
+    TokenType elemType;
+    size_t size;
+  };
+  elpc::SymbolTable<std::string, ArrayInfo> arrays;
+
+public:
+  SemanticAnalyzer(elpc::DiagnosticEngine &diag) : elpc::Sema(diag) {}
+
+  void visit(const AST::IntLiteral &node) override {
+    currentExprType = TokenType::I32; // It's an integer!
+  }
+
+  void visit(const AST::BoolLiteral &node) override {
+    currentExprType = TokenType::BOOL;
+  }
+
+  void visit(const AST::ArrayLiteral &node) override {
+    if (node.elements.empty()) {
+      error("Array literal cannot be empty", node.loc);
+      currentExprType = std::nullopt;
+      return;
+    }
+
+    node.elements[0]->accept(*this);
+    auto elemType = currentExprType;
+
+    for (size_t i = 1; i < node.elements.size(); i++) {
+      node.elements[i]->accept(*this);
+      if (currentExprType != elemType)
+        error("Array literal elements must all have the same type", node.loc);
+    }
+    currentExprType = elemType;
+  }
+
+  void visit(const AST::Identifier &node) override {
+    // When we add variables later, this will look them up!
+    auto typeOpt = symbols.lookup(node.name);
+    if (typeOpt) {
+      currentExprType = *typeOpt;
+      return;
+    }
+
+    auto arrOpt = arrays.lookup(node.name);
+    if (arrOpt) {
+      currentExprType = arrOpt->elemType;
+      return;
+    }
+    error("Undeclared variable '" + node.name + "'", node.loc);
+    currentExprType = std::nullopt;
+  }
+
+  void visit(const AST::BinaryExpr &node) override {
+    node.left->accept(*this);
+    auto leftType = currentExprType;
+    node.right->accept(*this);
+    auto rightType = currentExprType;
+
+    if (!leftType || !rightType) {
+      currentExprType = std::nullopt;
+      return;
+    }
+
+    switch (node.op) {
+    case TokenType::LESS:
+    case TokenType::GREATER:
+    case TokenType::LESS_EQ:
+    case TokenType::GREATER_EQ:
+      if (leftType != TokenType::I32 || rightType != TokenType::I32) {
+        error("Comparison operators require i32 operands", node.loc);
+      }
+      currentExprType = TokenType::BOOL;
+      break;
+    case TokenType::EQ_EQ:
+    case TokenType::NOT_EQ:
+      if (leftType != rightType) {
+        error("Operands must have the same type for equality comparison",
+              node.loc);
+      }
+      currentExprType = TokenType::BOOL;
+      break;
+    case TokenType::AND:
+    case TokenType::OR:
+      if (leftType != TokenType::BOOL || rightType != TokenType::BOOL)
+        error("'&&' and '||' require bool operands", node.loc);
+      currentExprType = TokenType::BOOL;
+      break;
+    case TokenType::PERCENT:
+      if (leftType != TokenType::I32 || rightType != TokenType::I32)
+        error("'%' requires i32 operands", node.loc);
+      currentExprType = TokenType::I32;
+      break;
+    default:
+      if (leftType != rightType)
+        error("Type mismatch in binary expression", node.loc);
+      currentExprType = leftType;
+      break;
+    }
+  }
+
+  void visit(const AST::CallExpr &node) override {
+    if (!functions.count(node.callee)) {
+      error("Call to undefined function '" + node.callee + "'", node.loc);
+      return;
+    }
+    auto &sig = functions[node.callee];
+    if (sig.paramTypes.size() != node.args.size()) {
+      error("Function '" + node.callee + "' expects " +
+                std::to_string(sig.paramTypes.size()) + " args",
+            node.loc);
+    }
+    for (auto &arg : node.args)
+      arg->accept(*this);
+    currentExprType = sig.retType;
+  }
+
+  void visit(const AST::AssignExpr &node) override {
+    auto varTypeOpt = symbols.lookup(node.name);
+    if (!varTypeOpt) {
+      error("Cannot assign to undeclared variable '" + node.name + "'",
+            node.loc);
+      return;
+    }
+
+    node.value->accept(*this);
+    if (currentExprType && *varTypeOpt != currentExprType) {
+      error("Type mismatch in assignment.", node.loc);
+    }
+  }
+
+  void visit(const AST::IndexExpr &node) override {
+    auto *ident = dynamic_cast<const AST::Identifier *>(node.array.get());
+    if (!ident) {
+      error("Can only index named arrays", node.loc);
+      currentExprType = std::nullopt;
+      return;
+    }
+
+    auto arrOpt = arrays.lookup(ident->name);
+    if (!arrOpt) {
+      error("'" + ident->name + "' is not an array", node.loc);
+      currentExprType = std::nullopt;
+      return;
+    }
+
+    node.index->accept(*this);
+    if (currentExprType != TokenType::I32)
+      error("Array index must be i32", node.loc);
+
+    currentExprType = arrOpt->elemType;
+  }
+
+  void visit(const AST::ExprStmt &node) override { node.expr->accept(*this); }
+
+  void visit(const AST::ReturnStmt &node) override {
+    node.value->accept(*this);
+
+    if (currentExprType && currentExpectedReturnType) {
+      if (currentExprType != currentExpectedReturnType) {
+        error("Return type mismatch. Function expected a different type.",
+              node.loc);
+      }
+    }
+  }
+
+  void visit(const AST::BlockStmt &node) override {
+    symbols.pushScope();
+    arrays.pushScope();
+
+    for (const auto &stmt : node.statements) {
+      stmt->accept(*this);
+    }
+
+    arrays.popScope();
+    symbols.popScope();
+  }
+
+  void visit(const AST::IfStmt &node) override {
+    node.condition->accept(*this);
+    if (!currentExprType) {
+      error("Invalid condition in if statement", node.loc);
+    }
+
+    node.thenBranch->accept(*this);
+    if (node.elseBranch) {
+      node.elseBranch->accept(*this);
+    }
+  }
+
+  void visit(const AST::WhileStmt &node) override {
+    node.condition->accept(*this);
+    if (!currentExprType) {
+      error("Invalid condition in while statement", node.loc);
+    }
+
+    node.whileBranch->accept(*this);
+  }
+
+  void visit(const AST::ForStmt &node) override {
+    symbols.pushScope();
+    arrays.pushScope();
+
+    node.init->accept(*this);
+
+    node.condition->accept(*this);
+    if (!currentExprType)
+      error("Invalid for loop condition", node.loc);
+
+    node.increment->accept(*this);
+    node.body->accept(*this);
+
+    arrays.popScope();
+    symbols.popScope();
+  }
+
+  void visit(const AST::VarDecl &node) override {
+    node.initializer->accept(*this);
+
+    if (node.isArray()) {
+      // Register in array table
+      if (!arrays.define(node.name, {node.type, *node.arraySize}))
+        error("Variable '" + node.name + "' already declared in this scope",
+              node.loc);
+
+      // Check initializer is an array literal with matching element type
+      if (currentExprType && currentExprType != node.type)
+        error("Array element type mismatch in declaration", node.loc);
+    } else {
+      if (!symbols.define(node.name, node.type))
+        error("Variable '" + node.name + "' already declared in this scope",
+              node.loc);
+    }
+  }
+
+  void visit(const AST::FunctionDecl &node) override {
+    std::vector<TokenType> pTypes;
+    for (auto &p : node.params)
+      pTypes.push_back(p.second);
+    functions[node.name] = {node.returnType, pTypes};
+
+    currentExpectedReturnType = node.returnType;
+    symbols.pushScope();
+    arrays.pushScope();
+
+    for (auto &p : node.params)
+      symbols.define(p.first, p.second);
+
+    node.body->accept(*this);
+
+    arrays.popScope();
+    symbols.popScope();
+    currentExpectedReturnType = std::nullopt;
+  }
+};
