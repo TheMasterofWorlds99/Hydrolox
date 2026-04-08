@@ -11,13 +11,16 @@ enum class TokenType {
   WHILE,
   FOR,
 
-  // TYPES (I32, F32)
+  // TYPES (I32, F32, etc)
+  U8,
   I32,
   BOOL,
+  STRING,
 
   // LITERALS (2, 3.141, 3.1i, etc)
-  I32_LIT,
+  INT_LIT,
   BOOL_LIT,
+  STRING_LIT,
 
   // SYMBOLS
   LEFT_PAREN,
@@ -71,12 +74,15 @@ inline elpc::Lexer<TokenType> GenerateLexer(const std::string &src) {
   lexer.addRule(TokenType::FOR, "\\bfor\\b");
 
   // Types
+  lexer.addRule(TokenType::U8, "\\bu8\\b");
   lexer.addRule(TokenType::I32, "\\bi32\\b");
   lexer.addRule(TokenType::BOOL, "\\bbool\\b");
+  lexer.addRule(TokenType::STRING, "\\bstring\\b");
 
   // Literals
-  lexer.addRule(TokenType::I32_LIT, "\\b[0-9]+\\b");
+  lexer.addRule(TokenType::INT_LIT, "\\b[0-9]+\\b");
   lexer.addRule(TokenType::BOOL_LIT, "\\b(true|false)\\b");
+  lexer.addRule(TokenType::STRING_LIT, "\"([^\"]*)\"");
 
   // Operators
   lexer.addRule(TokenType::PLUS, "\\+");

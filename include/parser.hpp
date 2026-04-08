@@ -14,7 +14,7 @@ public:
     // --- PRATT PARSER EXPRESSION RULES ---
 
     // Integer Literals
-    registerPrefix(TokenType::I32_LIT, [this](const auto &tok) -> ExprNode {
+    registerPrefix(TokenType::INT_LIT, [this](const auto &tok) -> ExprNode {
       return std::make_unique<AST::IntLiteral>(tok.toInt().value_or(0),
                                                tok.location);
     });
@@ -25,13 +25,32 @@ public:
       return std::make_unique<AST::BoolLiteral>(val, tok.location);
     });
 
+    // String Literals
+    registerPrefix(TokenType::STRING_LIT, [this](const auto &tok) -> ExprNode {
+      std::string val = tok.lexeme.substr(1, tok.lexeme.size() - 2);
+      return std::make_unique<AST::StringLiteral>(val, tok.location);
+    });
+
     // Identifiers (Variables)
     registerPrefix(TokenType::IDENT, [this](const auto &tok) -> ExprNode {
       return std::make_unique<AST::Identifier>(tok.lexeme, tok.location);
     });
 
-    // Grouping Parenthesis: ( 1 + 2 )
+    // Grouping Parenthesis && Type casting
     registerPrefix(TokenType::LEFT_PAREN, [this](const auto &tok) -> ExprNode {
+      if ((peek().isOneOf(TokenType::U8, TokenType::I32, TokenType::BOOL,
+                          TokenType::STRING)) &&
+          peek(1).is(TokenType::RIGHT_PAREN)) {
+
+        auto typeTok = consume(); // Consume the type
+        consume();                // Consume ')'
+
+        // UNARY precedence ensures `(u8)x + y` casts `x`, not `x + y`
+        auto expr = parseExpression(elpc::Precedence::UNARY);
+        return std::make_unique<AST::CastExpr>(typeTok.type, std::move(expr),
+                                               tok.location);
+      }
+
       auto expr = parseExpression(elpc::Precedence::NONE);
       expect(TokenType::RIGHT_PAREN, "Expected ')' after expression.");
       return expr;
@@ -215,8 +234,9 @@ private:
   std::unique_ptr<AST::FunctionDecl> parseFunctionDecl() {
     auto funcTok = consume(); // Consume 'func'
 
-    auto typeTok = expectOneOf("Expected return type (e.g. 'i32').",
-                               TokenType::I32, TokenType::BOOL);
+    auto typeTok =
+        expectOneOf("Expected return type (e.g. 'i32').", TokenType::U8,
+                    TokenType::I32, TokenType::BOOL, TokenType::STRING);
     auto nameTok = expect(TokenType::IDENT, "Expected function name.");
 
     expect(TokenType::LEFT_PAREN, "Expected '(' after function name.");
@@ -226,8 +246,9 @@ private:
       do {
         auto paramName = expect(TokenType::IDENT, "Expected parameter name.");
         expect(TokenType::COLON, "Expected ':'.");
-        auto paramType = expectOneOf("Expected parameter type.", TokenType::I32,
-                                     TokenType::BOOL);
+        auto paramType =
+            expectOneOf("Expected parameter type.", TokenType::U8,
+                        TokenType::I32, TokenType::BOOL, TokenType::STRING);
         params.push_back({paramName.lexeme, paramType.type});
       } while (match(TokenType::COMMA));
     }
@@ -336,11 +357,12 @@ private:
     auto nameTok = consume(); // We know it's an IDENT
     expect(TokenType::COLON, "Expected ':' after variable name.");
     auto typeTok =
-        expectOneOf("Expected variable type.", TokenType::I32, TokenType::BOOL);
+        expectOneOf("Expected variable type.", TokenType::U8, TokenType::I32,
+                    TokenType::BOOL, TokenType::STRING);
 
     std::optional<size_t> arraySize;
     if (match(TokenType::LEFT_SQ_BRACE)) {
-      auto sizeTok = expect(TokenType::I32_LIT, "Expected array size.");
+      auto sizeTok = expect(TokenType::INT_LIT, "Expected array size.");
       arraySize = static_cast<size_t>(sizeTok.toInt().value_or(0));
       expect(TokenType::RIGHT_SQ_BRACE, "Expected ']' after array size.");
     }

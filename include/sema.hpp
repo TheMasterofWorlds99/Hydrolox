@@ -40,6 +40,10 @@ public:
     currentExprType = TokenType::BOOL;
   }
 
+  void visit(const AST::StringLiteral &node) override {
+    currentExprType = TokenType::STRING;
+  }
+
   void visit(const AST::ArrayLiteral &node) override {
     if (node.elements.empty()) {
       error("Array literal cannot be empty", node.loc);
@@ -86,13 +90,20 @@ public:
       return;
     }
 
+    if (leftType == TokenType::I32 && rightType == TokenType::U8)
+      rightType = TokenType::I32;
+    if (leftType == TokenType::U8 && rightType == TokenType::I32)
+      leftType = TokenType::I32;
+
     switch (node.op) {
     case TokenType::LESS:
     case TokenType::GREATER:
     case TokenType::LESS_EQ:
     case TokenType::GREATER_EQ:
-      if (leftType != TokenType::I32 || rightType != TokenType::I32) {
-        error("Comparison operators require i32 operands", node.loc);
+      if ((leftType != TokenType::I32 && leftType != TokenType::U8) ||
+          rightType != TokenType::I32) {
+        error("Comparison operators require matching numeric operands",
+              node.loc);
       }
       currentExprType = TokenType::BOOL;
       break;
@@ -111,9 +122,11 @@ public:
       currentExprType = TokenType::BOOL;
       break;
     case TokenType::PERCENT:
-      if (leftType != TokenType::I32 || rightType != TokenType::I32)
-        error("'%' requires i32 operands", node.loc);
-      currentExprType = TokenType::I32;
+      if ((leftType != TokenType::I32 && leftType != TokenType::U8) ||
+          leftType != rightType) {
+        error("'%' requires matching numeric operands", node.loc);
+      }
+      currentExprType = leftType;
       break;
     default:
       if (leftType != rightType)
@@ -134,8 +147,16 @@ public:
                 std::to_string(sig.paramTypes.size()) + " args",
             node.loc);
     }
-    for (auto &arg : node.args)
-      arg->accept(*this);
+    for (size_t i = 0; i < node.args.size(); ++i) {
+      node.args[i]->accept(*this);
+
+      if (currentExprType == TokenType::U8 &&
+          sig.paramTypes[i] == TokenType::I32) {
+        // Its allowed
+      } else if (currentExprType != sig.paramTypes[i]) {
+        error("Argument type mismatch in function call", node.loc);
+      }
+    }
     currentExprType = sig.retType;
   }
 
@@ -149,7 +170,11 @@ public:
 
     node.value->accept(*this);
     if (currentExprType && *varTypeOpt != currentExprType) {
-      error("Type mismatch in assignment.", node.loc);
+      if (currentExprType == TokenType::U8 && *varTypeOpt == TokenType::I32) {
+        // Implicit widening (u8 -> i32) is ALLOWED
+      } else {
+        error("Type mismatch in assignment. Explicit cast required.", node.loc);
+      }
     }
   }
 
@@ -175,15 +200,29 @@ public:
     currentExprType = arrOpt->elemType;
   }
 
+  void visit(const AST::CastExpr &node) override {
+    node.expr->accept(*this);
+
+    // Safety check: Don't allow casting a string to an integer!
+    if (currentExprType == TokenType::STRING &&
+        node.targetType != TokenType::STRING) {
+      error("Cannot cast string to numeric type", node.loc);
+    }
+
+    currentExprType = node.targetType; // The type is now explicitly changed
+  }
+
   void visit(const AST::ExprStmt &node) override { node.expr->accept(*this); }
 
   void visit(const AST::ReturnStmt &node) override {
     node.value->accept(*this);
 
     if (currentExprType && currentExpectedReturnType) {
-      if (currentExprType != currentExpectedReturnType) {
-        error("Return type mismatch. Function expected a different type.",
-              node.loc);
+      if (currentExprType == TokenType::U8 &&
+          currentExpectedReturnType == TokenType::I32) {
+        // Allowed!
+      } else if (currentExprType != currentExpectedReturnType) {
+        error("Return type mismatch.", node.loc);
       }
     }
   }
@@ -241,6 +280,10 @@ public:
   void visit(const AST::VarDecl &node) override {
     node.initializer->accept(*this);
 
+    if (currentExprType == TokenType::I32 && node.type == TokenType::U8) {
+      currentExprType = TokenType::U8;
+    }
+
     if (node.isArray()) {
       // Register in array table
       if (!arrays.define(node.name, {node.type, *node.arraySize}))
@@ -251,6 +294,15 @@ public:
       if (currentExprType && currentExprType != node.type)
         error("Array element type mismatch in declaration", node.loc);
     } else {
+      if (currentExprType && currentExprType != node.type) {
+        if (currentExprType == TokenType::U8 && node.type == TokenType::I32) {
+          // Implicit widening is ALLOWED
+        } else {
+          error("Type mismatch in declaration. Explicit cast required.",
+                node.loc);
+        }
+      }
+
       if (!symbols.define(node.name, node.type))
         error("Variable '" + node.name + "' already declared in this scope",
               node.loc);

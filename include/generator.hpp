@@ -4,6 +4,7 @@
 #include <elpc/elpc.hpp>
 #include <elpc/ir/llvmBridge.hpp>
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Type.h>
@@ -20,7 +21,6 @@ class ArrayTable {
 
 public:
   ArrayTable() { scopes.emplace_back(); }
-
   void pushScope() { scopes.emplace_back(); }
   void popScope() {
     if (scopes.size() > 1)
@@ -30,7 +30,6 @@ public:
   void define(const std::string &name, ArrayVar var) {
     scopes.back()[name] = std::move(var);
   }
-
   ArrayVar *lookup(const std::string &name) {
     for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
       auto found = it->find(name);
@@ -43,23 +42,72 @@ public:
 
 class LLVMGenerator : public AST::ASTVisitor {
   elpc::LLVMBridge &bridge;
-
-  // Tghis holds the result of the last evaluated expr node
   llvm::Value *currentValue = nullptr;
-
   ArrayTable arrays;
   std::vector<llvm::Value *> lastArrayElements;
+
+  auto &b() { return bridge.getBuilder(); }
+
+  llvm::LLVMContext &ctx() { return bridge.getContext(); }
+
+  llvm::Value *constI32(int v) {
+    return llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx()), v, true);
+  }
+
+  llvm::Value *condToI1(llvm::Value *val) {
+    if (val->getType()->isIntegerTy(1))
+      return val;
+    return b().CreateICmpNE(val, constI32(0), "cond");
+  }
+
+  llvm::Type *toLLVMType(TokenType type) {
+    switch (type) {
+    case TokenType::U8:
+      return llvm::Type::getInt8Ty(ctx());
+    case TokenType::I32:
+      return llvm::Type::getInt32Ty(ctx());
+    case TokenType::BOOL:
+      return llvm::Type::getInt1Ty(ctx());
+    case TokenType::STRING:
+      return llvm::PointerType::getUnqual(ctx());
+    default:
+      throw std::runtime_error("Unknown type");
+    }
+  }
+
+  llvm::Value *castIfNeeded(llvm::Value *val, llvm::Type *destType) {
+    if (!val)
+      return nullptr;
+    llvm::Type *srcType = val->getType();
+    if (srcType == destType)
+      return val;
+
+    // Widening: u8 -> i32
+    if (srcType->isIntegerTy(8) && destType->isIntegerTy(32)) {
+      return b().CreateZExt(val, destType, "widen_u8_to_i32");
+    }
+    // Narrowing: i32 -> u8 (kept for assigning literals like x: u8 = 10;)
+    if (srcType->isIntegerTy(32) && destType->isIntegerTy(8)) {
+      return b().CreateTrunc(val, destType, "narrow_i32_to_u8");
+    }
+    return val;
+  }
 
 public:
   LLVMGenerator(elpc::LLVMBridge &bridge) : bridge(bridge) {}
 
   void visit(const AST::IntLiteral &node) override {
-    // LLVM handles 32-bit ints perfectly natively
-    currentValue = bridge.emitInt(node.value, 32);
+    currentValue =
+        llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx()), node.value, true);
   }
 
   void visit(const AST::BoolLiteral &node) override {
-    currentValue = bridge.emitBool(node.value);
+    currentValue = llvm::ConstantInt::get(llvm::Type::getInt1Ty(ctx()),
+                                          node.value ? 1 : 0);
+  }
+
+  void visit(const AST::StringLiteral &node) override {
+    currentValue = b().CreateGlobalString(node.value, "str");
   }
 
   void visit(const AST::ArrayLiteral &node) override {
@@ -68,76 +116,88 @@ public:
       elem->accept(*this);
       lastArrayElements.push_back(currentValue);
     }
-    currentValue = nullptr; // array literals don't produce a scalar
+    currentValue = nullptr;
   }
 
   void visit(const AST::Identifier &node) override {
-    auto varOpt = bridge.lookupVar(node.name, node.loc);
+    auto varOpt = bridge.lookupVar(node.name);
     if (!varOpt) {
       bridge.error("Variable not found in scope", node.loc);
       currentValue = nullptr;
       return;
     }
-
-    auto var = *varOpt;
-    currentValue = bridge.emitLoad(var.type, var.ptr, node.name + "_val");
+    currentValue =
+        b().CreateLoad(varOpt->type, varOpt->ptr, node.name + "_val");
   }
 
   void visit(const AST::BinaryExpr &node) override {
     node.left->accept(*this);
     llvm::Value *lhs = currentValue;
-
     node.right->accept(*this);
     llvm::Value *rhs = currentValue;
-
     if (!lhs || !rhs)
       return;
 
+    // IMPLICIT WIDENING BEFORE MATH
+    if (lhs->getType()->isIntegerTy(8) && rhs->getType()->isIntegerTy(32)) {
+      lhs = castIfNeeded(lhs, rhs->getType()); // Widen left to i32
+    } else if (lhs->getType()->isIntegerTy(32) &&
+               rhs->getType()->isIntegerTy(8)) {
+      rhs = castIfNeeded(rhs, lhs->getType()); // Widen right to i32
+    }
+
+    bool isU8 = lhs->getType()->isIntegerTy(8);
+
     switch (node.op) {
     case TokenType::PLUS:
-      currentValue = bridge.emitAdd(lhs, rhs, "addtmp");
+      currentValue = b().CreateAdd(lhs, rhs, "add");
       break;
     case TokenType::MINUS:
-      currentValue = bridge.emitSub(lhs, rhs, "subtmp");
+      currentValue = b().CreateSub(lhs, rhs, "sub");
       break;
     case TokenType::STAR:
-      currentValue = bridge.emitMul(lhs, rhs, "multmp");
-      break;
-    case TokenType::SLASH:
-      // We pass the source location so elpc can catch div-by-zero!
-      currentValue = bridge.emitDiv(lhs, rhs, "divtmp", node.loc);
-      break;
-    case TokenType::LESS:
-      currentValue = bridge.emitICmpLT(lhs, rhs, "cmptmp");
-      break;
-
-    case TokenType::GREATER:
-      currentValue = bridge.emitICmpGT(lhs, rhs, "cmptmp");
-      break;
-
-    case TokenType::LESS_EQ:
-      currentValue = bridge.emitICmpLTE(lhs, rhs, "cmptmp");
-      break;
-
-    case TokenType::GREATER_EQ:
-      currentValue = bridge.emitICmpGTE(lhs, rhs, "cmptmp");
-      break;
-
-    case TokenType::EQ_EQ:
-      currentValue = bridge.emitICmpEQ(lhs, rhs, "cmptmp");
-      break;
-
-    case TokenType::NOT_EQ:
-      currentValue = bridge.emitICmpNE(lhs, rhs, "cmptmp");
-      break;
-    case TokenType::AND:
-      currentValue = bridge.emitAnd(lhs, rhs, "andtmp");
-      break;
-    case TokenType::OR:
-      currentValue = bridge.emitOr(lhs, rhs, "ortmp");
+      currentValue = b().CreateMul(lhs, rhs, "mul");
       break;
     case TokenType::PERCENT:
-      currentValue = bridge.emitSRem(lhs, rhs, "modtmp");
+      currentValue = isU8 ? b().CreateURem(lhs, rhs, "mod")
+                          : b().CreateSRem(lhs, rhs, "mod");
+      break;
+    case TokenType::SLASH:
+      if (auto *c = llvm::dyn_cast<llvm::ConstantInt>(rhs); c && c->isZero()) {
+        bridge.error("Division by zero", node.loc);
+        currentValue = constI32(0);
+      } else {
+        currentValue = isU8 ? b().CreateUDiv(lhs, rhs, "div")
+                            : b().CreateSDiv(lhs, rhs, "div");
+      }
+      break;
+    case TokenType::LESS:
+      currentValue = isU8 ? b().CreateICmpULT(lhs, rhs, "cmp")
+                          : b().CreateICmpSLT(lhs, rhs, "cmp");
+      break;
+    case TokenType::GREATER:
+      currentValue = isU8 ? b().CreateICmpUGT(lhs, rhs, "cmp")
+                          : b().CreateICmpSGT(lhs, rhs, "cmp");
+      break;
+    case TokenType::LESS_EQ:
+      currentValue = isU8 ? b().CreateICmpULE(lhs, rhs, "cmp")
+                          : b().CreateICmpSLE(lhs, rhs, "cmp");
+      break;
+    case TokenType::GREATER_EQ:
+      currentValue = isU8 ? b().CreateICmpUGE(lhs, rhs, "cmp")
+                          : b().CreateICmpSGE(lhs, rhs, "cmp");
+      break;
+    case TokenType::EQ_EQ:
+      currentValue = b().CreateICmpEQ(lhs, rhs, "cmp");
+      break;
+    case TokenType::NOT_EQ:
+      currentValue = b().CreateICmpNE(lhs, rhs, "cmp");
+      break;
+    case TokenType::AND:
+      currentValue = b().CreateAnd(lhs, rhs, "and");
+      break;
+    case TokenType::OR:
+      currentValue = b().CreateOr(lhs, rhs, "or");
       break;
     default:
       bridge.error("Unknown binary operator", node.loc);
@@ -147,32 +207,33 @@ public:
   }
 
   void visit(const AST::CallExpr &node) override {
-    std::string calleeName = (node.callee == "start") ? "main" : node.callee;
-    llvm::Function *fn = bridge.getModule().getFunction(calleeName);
-
+    std::string name = (node.callee == "start") ? "main" : node.callee;
+    llvm::Function *fn = bridge.getModule().getFunction(name);
     if (!fn)
       return;
 
     std::vector<llvm::Value *> args;
-    for (auto &arg : node.args) {
-      arg->accept(*this);
-      args.push_back(currentValue);
+    for (size_t i = 0; i < node.args.size(); ++i) {
+      node.args[i]->accept(*this);
+
+      // Widen the argument if the function requires an i32 but we gave it a u8
+      llvm::Type *expectedType = fn->getFunctionType()->getParamType(i);
+      llvm::Value *castedArg = castIfNeeded(currentValue, expectedType);
+
+      args.push_back(castedArg);
     }
-    currentValue = bridge.emitCall(fn, args, "calltmp");
+    currentValue = b().CreateCall(fn, args, "call");
   }
 
   void visit(const AST::AssignExpr &node) override {
     node.value->accept(*this);
-    llvm::Value *val = currentValue;
-    if (!val)
+    auto varOpt = bridge.lookupVar(node.name);
+    if (!varOpt || !currentValue)
       return;
 
-    auto varOpt = bridge.lookupVar(node.name, node.loc);
-    if (!varOpt)
-      return;
-
-    auto var = *varOpt;
-    bridge.emitStore(val, var.ptr);
+    // Automagically fix the type!
+    currentValue = castIfNeeded(currentValue, varOpt->type);
+    b().CreateStore(currentValue, varOpt->ptr);
   }
 
   void visit(const AST::IndexExpr &node) override {
@@ -191,161 +252,115 @@ public:
     }
 
     node.index->accept(*this);
-    llvm::Value *idx = currentValue;
-
     llvm::ArrayType *arrType = llvm::ArrayType::get(arr->elemType, arr->size);
-    llvm::Value *zero = bridge.emitInt(0, 32);
-    llvm::Value *gep = bridge.getBuilder().CreateGEP(
-        arrType, arr->ptr, {zero, idx}, ident->name + "_idx");
+    llvm::Value *gep = b().CreateGEP(
+        arrType, arr->ptr, {constI32(0), currentValue}, ident->name + "_idx");
+    currentValue = b().CreateLoad(arr->elemType, gep, ident->name + "_elem");
+  }
 
-    currentValue = bridge.emitLoad(arr->elemType, gep, ident->name + "_elem");
+  void visit(const AST::CastExpr &node) override {
+    node.expr->accept(*this);
+    if (!currentValue)
+      return;
+
+    llvm::Type *destType = toLLVMType(node.targetType);
+
+    // castIfNeeded automatically issues the correct CreateTrunc or CreateZExt
+    // instruction!
+    currentValue = castIfNeeded(currentValue, destType);
   }
 
   void visit(const AST::IfStmt &node) override {
     node.condition->accept(*this);
-    llvm::Value *condVal = currentValue;
-    if (!condVal)
+    if (!currentValue)
       return;
 
-    // If it's already i1 (result of a comparison), use it directly
-    llvm::Value *condI1;
-    if (condVal->getType()->isIntegerTy(1)) {
-      condI1 = condVal;
-    } else {
-      llvm::Value *zero = bridge.emitInt(0, 32);
-      condI1 = bridge.emitICmpNE(condVal, zero, "ifcond");
-    }
-
+    llvm::Value *condI1 = condToI1(currentValue);
     llvm::Function *fn = bridge.getCurrentFunction();
-    llvm::BasicBlock *thenBB =
-        llvm::BasicBlock::Create(bridge.getContext(), "then", fn);
-    llvm::BasicBlock *elseBB =
-        llvm::BasicBlock::Create(bridge.getContext(), "else");
-    llvm::BasicBlock *mergeBB =
-        llvm::BasicBlock::Create(bridge.getContext(), "ifcont");
+    llvm::BasicBlock *thenBB = llvm::BasicBlock::Create(ctx(), "then", fn);
+    llvm::BasicBlock *elseBB = llvm::BasicBlock::Create(ctx(), "else");
+    llvm::BasicBlock *mergeBB = llvm::BasicBlock::Create(ctx(), "ifcont");
 
-    // Branch to either Then or Else
-    bridge.emitCondBranch(condI1, thenBB, node.elseBranch ? elseBB : mergeBB);
+    b().CreateCondBr(condI1, thenBB, node.elseBranch ? elseBB : mergeBB);
 
-    bridge.setInsertBlock(thenBB);
+    b().SetInsertPoint(thenBB);
     node.thenBranch->accept(*this);
-    // Note: If the block already hit a 'return', we don't emit the merge
-    // branch
-    if (!bridge.getBuilder().GetInsertBlock()->getTerminator()) {
-      bridge.emitBranch(mergeBB);
-    }
+    if (!b().GetInsertBlock()->getTerminator())
+      b().CreateBr(mergeBB);
 
     if (node.elseBranch) {
-      fn->insert(fn->end(), elseBB); // Add else block to function
-      bridge.setInsertBlock(elseBB);
+      fn->insert(fn->end(), elseBB);
+      b().SetInsertPoint(elseBB);
       node.elseBranch->accept(*this);
-
-      if (!bridge.getBuilder().GetInsertBlock()->getTerminator()) {
-        bridge.emitBranch(mergeBB);
-      }
+      if (!b().GetInsertBlock()->getTerminator())
+        b().CreateBr(mergeBB);
     }
 
     fn->insert(fn->end(), mergeBB);
-    bridge.setInsertBlock(mergeBB);
+    b().SetInsertPoint(mergeBB);
   }
 
   void visit(const AST::WhileStmt &node) override {
     llvm::Function *fn = bridge.getCurrentFunction();
+    llvm::BasicBlock *condBB = llvm::BasicBlock::Create(ctx(), "loop.cond", fn);
+    llvm::BasicBlock *bodyBB = llvm::BasicBlock::Create(ctx(), "loop.body");
+    llvm::BasicBlock *endBB = llvm::BasicBlock::Create(ctx(), "loop.end");
 
-    llvm::BasicBlock *condBB =
-        llvm::BasicBlock::Create(bridge.getContext(), "loop.cond", fn);
-    llvm::BasicBlock *bodyBB =
-        llvm::BasicBlock::Create(bridge.getContext(), "loop.body");
-    llvm::BasicBlock *endBB =
-        llvm::BasicBlock::Create(bridge.getContext(), "loop.end");
+    b().CreateBr(condBB);
 
-    // jump to condition
-    bridge.emitBranch(condBB);
-
-    // CONDITION
-    bridge.setInsertBlock(condBB);
+    b().SetInsertPoint(condBB);
     node.condition->accept(*this);
-    llvm::Value *condVal = currentValue;
+    b().CreateCondBr(condToI1(currentValue), bodyBB, endBB);
 
-    llvm::Value *condI1;
-    if (condVal->getType()->isIntegerTy(1)) {
-      condI1 = condVal;
-    } else {
-      llvm::Value *zero = bridge.emitInt(0, 32);
-      condI1 = bridge.emitICmpNE(condVal, zero, "whilecond");
-    }
-
-    bridge.emitCondBranch(condI1, bodyBB, endBB);
-
-    // BODY
     fn->insert(fn->end(), bodyBB);
-    bridge.setInsertBlock(bodyBB);
-
+    b().SetInsertPoint(bodyBB);
     node.whileBranch->accept(*this);
+    if (!b().GetInsertBlock()->getTerminator())
+      b().CreateBr(condBB);
 
-    if (!bridge.getBuilder().GetInsertBlock()->getTerminator()) {
-      bridge.emitBranch(condBB); // back-edge
-    }
-
-    // END
     fn->insert(fn->end(), endBB);
-    bridge.setInsertBlock(endBB);
+    b().SetInsertPoint(endBB);
   }
 
   void visit(const AST::ForStmt &node) override {
     llvm::Function *fn = bridge.getCurrentFunction();
 
-    // Init (runs once, before the loop)
     arrays.pushScope();
     node.init->accept(*this);
 
-    llvm::BasicBlock *condBB =
-        llvm::BasicBlock::Create(bridge.getContext(), "for.cond", fn);
-    llvm::BasicBlock *bodyBB =
-        llvm::BasicBlock::Create(bridge.getContext(), "for.body");
-    llvm::BasicBlock *incrBB =
-        llvm::BasicBlock::Create(bridge.getContext(), "for.incr");
-    llvm::BasicBlock *endBB =
-        llvm::BasicBlock::Create(bridge.getContext(), "for.end");
+    llvm::BasicBlock *condBB = llvm::BasicBlock::Create(ctx(), "for.cond", fn);
+    llvm::BasicBlock *bodyBB = llvm::BasicBlock::Create(ctx(), "for.body");
+    llvm::BasicBlock *incrBB = llvm::BasicBlock::Create(ctx(), "for.incr");
+    llvm::BasicBlock *endBB = llvm::BasicBlock::Create(ctx(), "for.end");
 
-    bridge.emitBranch(condBB);
+    b().CreateBr(condBB);
 
-    // CONDITION
-    bridge.setInsertBlock(condBB);
+    b().SetInsertPoint(condBB);
     node.condition->accept(*this);
-    llvm::Value *condVal = currentValue;
-    llvm::Value *condI1;
-    if (condVal->getType()->isIntegerTy(1)) {
-      condI1 = condVal;
-    } else {
-      condI1 = bridge.emitICmpNE(condVal, bridge.emitInt(0, 32), "forcond");
-    }
-    bridge.emitCondBranch(condI1, bodyBB, endBB);
+    b().CreateCondBr(condToI1(currentValue), bodyBB, endBB);
 
-    // BODY
     fn->insert(fn->end(), bodyBB);
-    bridge.setInsertBlock(bodyBB);
+    b().SetInsertPoint(bodyBB);
     node.body->accept(*this);
-    if (!bridge.getBuilder().GetInsertBlock()->getTerminator())
-      bridge.emitBranch(incrBB);
+    if (!b().GetInsertBlock()->getTerminator())
+      b().CreateBr(incrBB);
 
-    // INCREMENT
     fn->insert(fn->end(), incrBB);
-    bridge.setInsertBlock(incrBB);
+    b().SetInsertPoint(incrBB);
     node.increment->accept(*this);
-    bridge.emitBranch(condBB); // back-edge to condition
+    b().CreateBr(condBB);
 
-    // END
     fn->insert(fn->end(), endBB);
-    bridge.setInsertBlock(endBB);
-
+    b().SetInsertPoint(endBB);
     arrays.popScope();
   }
 
   void visit(const AST::ReturnStmt &node) override {
     node.value->accept(*this);
     if (currentValue) {
-      bridge.emitReturn(currentValue);
+      llvm::Type *retType = bridge.getCurrentFunction()->getReturnType();
+      currentValue = castIfNeeded(currentValue, retType);
+      b().CreateRet(currentValue);
     }
   }
 
@@ -366,37 +381,35 @@ public:
       llvm::Value *alloca = bridge.emitAlloca(arrType, node.name);
 
       arrays.define(node.name, {alloca, elemType, size});
-
-      // Initializer must be an ArrayLiteral — accept() fills lastArrayElements
       node.initializer->accept(*this);
+
       for (size_t i = 0; i < lastArrayElements.size() && i < size; i++) {
-        llvm::Value *zero = bridge.emitInt(0, 32);
-        llvm::Value *idx = bridge.emitInt(static_cast<int>(i), 32);
-        llvm::Value *gep = bridge.getBuilder().CreateGEP(
-            arrType, alloca, {zero, idx},
+        llvm::Value *gep = b().CreateGEP(
+            arrType, alloca, {constI32(0), constI32(static_cast<int>(i))},
             node.name + "_init_" + std::to_string(i));
-        bridge.emitStore(lastArrayElements[i], gep);
+        b().CreateStore(lastArrayElements[i], gep);
       }
     } else {
       node.initializer->accept(*this);
-      llvm::Value *initVal = currentValue;
-      if (!initVal)
+      if (!currentValue)
         return;
 
       llvm::Type *varType = toLLVMType(node.type);
+
+      // Automagically fix the type!
+      currentValue = castIfNeeded(currentValue, varType);
+
       llvm::Value *alloca = bridge.emitAlloca(varType, node.name);
-      bridge.emitStore(initVal, alloca);
+      b().CreateStore(currentValue, alloca);
       bridge.defineVar(node.name, {alloca, varType}, node.loc);
     }
   }
 
   void visit(const AST::FunctionDecl &node) override {
     llvm::Type *retType = toLLVMType(node.returnType);
-
     std::vector<llvm::Type *> argTypes;
-    for (auto &p : node.params) {
+    for (auto &p : node.params)
       argTypes.push_back(toLLVMType(p.second));
-    }
 
     std::string fnName = (node.name == "start") ? "main" : node.name;
     llvm::Function *fn = bridge.beginFunction(fnName, retType, argTypes);
@@ -404,30 +417,15 @@ public:
     unsigned idx = 0;
     for (auto &arg : fn->args()) {
       std::string argName = node.params[idx].first;
+      llvm::Type *argType = toLLVMType(node.params[idx].second);
       arg.setName(argName);
-
-      llvm::Type *paramType = toLLVMType(node.params[idx].second);
-      llvm::Value *alloca = bridge.emitAlloca(paramType, argName);
-      bridge.emitStore(&arg, alloca);
-      bridge.defineVar(argName, {alloca, paramType}, node.loc);
+      llvm::Value *alloca = bridge.emitAlloca(argType, argName);
+      b().CreateStore(&arg, alloca);
+      bridge.defineVar(argName, {alloca, argType}, node.loc);
       idx++;
     }
 
     node.body->accept(*this);
-
     bridge.endFunction();
-  }
-
-private:
-  // Helper function
-  llvm::Type *toLLVMType(TokenType type) {
-    switch (type) {
-    case TokenType::I32:
-      return llvm::Type::getInt32Ty(bridge.getContext());
-    case TokenType::BOOL:
-      return llvm::Type::getInt1Ty(bridge.getContext());
-    default:
-      throw std::runtime_error("Unknown type");
-    }
   }
 };

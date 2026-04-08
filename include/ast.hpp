@@ -12,6 +12,7 @@ namespace AST {
 // === LITERAL ===
 struct IntLiteral;
 struct BoolLiteral;
+struct StringLiteral;
 struct ArrayLiteral;
 struct Identifier;
 
@@ -20,6 +21,7 @@ struct BinaryExpr;
 struct CallExpr;
 struct AssignExpr;
 struct IndexExpr;
+struct CastExpr;
 
 // === STMT ===
 struct ExprStmt;
@@ -39,6 +41,7 @@ public:
   virtual ~ASTVisitor() = default;
   virtual void visit(const IntLiteral &node) = 0;
   virtual void visit(const BoolLiteral &node) = 0;
+  virtual void visit(const StringLiteral &node) = 0;
   virtual void visit(const ArrayLiteral &node) = 0;
   virtual void visit(const Identifier &node) = 0;
 
@@ -46,6 +49,7 @@ public:
   virtual void visit(const CallExpr &node) = 0;
   virtual void visit(const AssignExpr &node) = 0;
   virtual void visit(const IndexExpr &node) = 0;
+  virtual void visit(const CastExpr &node) = 0;
 
   virtual void visit(const ExprStmt &node) = 0;
   virtual void visit(const ReturnStmt &node) = 0;
@@ -82,6 +86,17 @@ struct BoolLiteral : public Expr {
   bool value;
 
   BoolLiteral(bool val, elpc::SourceLocation loc) : value(val) {
+    this->loc = loc;
+  }
+
+  void accept(ASTVisitor &visitor) const override { visitor.visit(*this); }
+};
+
+struct StringLiteral : public Expr {
+  std::string value;
+
+  StringLiteral(std::string val, elpc::SourceLocation loc)
+      : value(std::move(val)) {
     this->loc = loc;
   }
 
@@ -159,6 +174,18 @@ struct IndexExpr : public Expr {
     this->loc = loc;
   }
 
+  void accept(ASTVisitor &visitor) const override { visitor.visit(*this); }
+};
+
+struct CastExpr : public Expr {
+  TokenType targetType;
+  std::unique_ptr<Expr> expr;
+
+  CastExpr(TokenType targetType, std::unique_ptr<Expr> expr,
+           elpc::SourceLocation loc)
+      : targetType(targetType), expr(std::move(expr)) {
+    this->loc = loc;
+  }
   void accept(ASTVisitor &visitor) const override { visitor.visit(*this); }
 };
 

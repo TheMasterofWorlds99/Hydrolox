@@ -1,12 +1,9 @@
-func i32 sumArray() {
-  arr: i32[5] = [10, 20, 30, 40, 45];
-  total: i32 = 0;
-  for (i: i32 = 0; i < 5; i++) {
-    total = total + arr[i];
-  }
-  return total;
-}
-
 func i32 start() {
-  return sumArray(); // expect ret i32 145
+  x: u8 = 200;
+  y: u8 = 100;
+
+  z: u8 = (u8)(x + y);
+  safe_val: i32 = x + y;
+
+  return safe_val;
 }
