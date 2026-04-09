@@ -27,7 +27,8 @@ public:
 
     // String Literals
     registerPrefix(TokenType::STRING_LIT, [this](const auto &tok) -> ExprNode {
-      std::string val = tok.lexeme.substr(1, tok.lexeme.size() - 2);
+      std::string raw = tok.lexeme.substr(1, tok.lexeme.size() - 2);
+      std::string val = unescapeString(raw);
       return std::make_unique<AST::StringLiteral>(val, tok.location);
     });
 
@@ -220,9 +221,11 @@ public:
     while (!isAtEnd()) {
       if (check(TokenType::FUNC)) {
         program.push_back(parseFunctionDecl());
+      } else if (check(TokenType::EXTERN)) {
+        program.push_back(parseExternDecl());
       } else {
         auto t = peek();
-        throw std::runtime_error("[hydrolox] Only function declarations "
+        throw std::runtime_error("[hydrolox] Only function/extern declarations "
                                  "allowed at top level. Found: " +
                                  t.lexeme);
       }
@@ -260,6 +263,44 @@ private:
     return std::make_unique<AST::FunctionDecl>(
         nameTok.lexeme, std::move(params), typeTok.type, std::move(body),
         funcTok.location);
+  }
+
+  std::unique_ptr<AST::ExternDecl> parseExternDecl() {
+    auto extTok = consume(); // Consume extern
+    expect(TokenType::FUNC, "Expected 'func' after 'extern'");
+
+    auto typeTok =
+        expectOneOf("Expected Return Type", TokenType::U8, TokenType::U16,
+                    TokenType::I32, TokenType::BOOL, TokenType::STRING);
+    auto nameTok = expect(TokenType::IDENT, "Expected function name");
+
+    expect(TokenType::LEFT_PAREN, "Expected '(' after function name");
+
+    std::vector<TokenType> paramTypes;
+    bool isVariadic = false;
+
+    if (!check(TokenType::RIGHT_PAREN)) {
+      do {
+        if (match(TokenType::TRIPLEDOT)) {
+          isVariadic = true;
+          break; // ... needs to be the final parameter
+        }
+
+        expect(TokenType::IDENT, "Expected parameter name");
+        expect(TokenType::COLON, "Expected ':'");
+        auto paramType = expectOneOf("Expected parameter type.", TokenType::U8,
+                                     TokenType::U16, TokenType::I32,
+                                     TokenType::BOOL, TokenType::STRING);
+        paramTypes.push_back(paramType.type);
+      } while (match(TokenType::COMMA));
+    }
+
+    expect(TokenType::RIGHT_PAREN, "Expected ')' after parameters");
+    expect(TokenType::SEMICOLON, "Expected ';' after extern declaration");
+
+    return std::make_unique<AST::ExternDecl>(
+        nameTok.lexeme, std::move(paramTypes), typeTok.type, isVariadic,
+        extTok.location);
   }
 
   std::unique_ptr<AST::BlockStmt> parseBlock() {
@@ -381,5 +422,40 @@ private:
     auto expr = parseExpression(elpc::Precedence::NONE);
     expect(TokenType::SEMICOLON, "Expected ';' after expression.");
     return std::make_unique<AST::ExprStmt>(std::move(expr), expr->loc);
+  }
+
+private:
+  // Helper to properly handle literals like \n, \r, etc
+  std::string unescapeString(const std::string &input) {
+    std::string out;
+    for (size_t i = 0; i < input.length(); ++i) {
+      if (input[i] == '\\' && i + 1 < input.length()) {
+        switch (input[i + 1]) {
+        case 'n':
+          out += '\n';
+          break;
+        case 't':
+          out += '\t';
+          break;
+        case 'r':
+          out += '\r';
+          break;
+        case '\\':
+          out += '\\';
+          break;
+        case '"':
+          out += '"';
+          break;
+        default:
+          out += '\\';
+          out += input[i + 1];
+          break;
+        }
+        i++; // Skip the escaped char
+      } else {
+        out += input[i];
+      }
+    }
+    return out;
   }
 };

@@ -5,6 +5,7 @@
 enum class TokenType {
   // KEYWORDS
   FUNC,
+  EXTERN,
   RETURN,
   IF,
   ELSE,
@@ -36,6 +37,7 @@ enum class TokenType {
   RIGHT_SQ_BRACE,
   BANG,
   PERCENT,
+  TRIPLEDOT,
 
   // OPERATORS
   PLUS,
@@ -68,6 +70,7 @@ inline elpc::Lexer<TokenType> GenerateLexer(const std::string &src) {
 
   // Keywords
   lexer.addRule(TokenType::FUNC, "\\bfunc\\b");
+  lexer.addRule(TokenType::EXTERN, "\\bextern\\b");
   lexer.addRule(TokenType::RETURN, "\\breturn\\b");
   lexer.addRule(TokenType::IF, "\\bif\\b");
   lexer.addRule(TokenType::ELSE, "\\belse\\b");
@@ -117,6 +120,7 @@ inline elpc::Lexer<TokenType> GenerateLexer(const std::string &src) {
   lexer.addRule(TokenType::EQUAL, "\\=");
   lexer.addRule(TokenType::BANG, "\\!");
   lexer.addRule(TokenType::PERCENT, "\\%");
+  lexer.addRule(TokenType::TRIPLEDOT, "\\.\\.\\.");
 
   // Logical Operators
   lexer.addRule(TokenType::AND, "&&");

@@ -230,14 +230,30 @@ public:
       return;
 
     std::vector<llvm::Value *> args;
+    llvm::FunctionType *fnType = fn->getFunctionType();
+
     for (size_t i = 0; i < node.args.size(); ++i) {
       node.args[i]->accept(*this);
+      if (!currentValue)
+        continue;
 
-      // Widen the argument if the function requires an i32 but we gave it a u8
-      llvm::Type *expectedType = fn->getFunctionType()->getParamType(i);
-      llvm::Value *castedArg = castIfNeeded(currentValue, expectedType);
+      llvm::Value *argVal = currentValue;
 
-      args.push_back(castedArg);
+      // If the argument corresponds to a defined parameter, cast it
+      if (i < fnType->getNumParams()) {
+        llvm::Type *expectedType = fnType->getParamType(i);
+        argVal = castIfNeeded(argVal, expectedType);
+      } else {
+        // This is a variadic argument (...)
+        // Standard C ABI dictates small ints are promoted to 32-bit in varargs
+        llvm::Type *argLLVMType = argVal->getType();
+        if (argLLVMType->isIntegerTy(8) || argLLVMType->isIntegerTy(16)) {
+          argVal = b().CreateZExt(argVal, llvm::Type::getInt32Ty(ctx()),
+                                  "vararg_prom");
+        }
+      }
+
+      args.push_back(argVal);
     }
     currentValue = b().CreateCall(fn, args, "call");
   }
@@ -444,5 +460,21 @@ public:
 
     node.body->accept(*this);
     bridge.endFunction();
+  }
+
+  void visit(const AST::ExternDecl &node) override {
+    llvm::Type *retType = toLLVMType(node.returnType);
+    std::vector<llvm::Type *> argTypes;
+    for (auto t : node.paramTypes) {
+      argTypes.push_back(toLLVMType(t));
+    }
+
+    llvm::FunctionType *fnType =
+        llvm::FunctionType::get(retType, argTypes, node.isVariadic);
+
+    // Create the function with ExternalLinkage, meaning "The Linker will find
+    // this later!"
+    llvm::Function::Create(fnType, llvm::Function::ExternalLinkage, node.name,
+                           bridge.getModule());
   }
 };

@@ -34,6 +34,7 @@ struct ForStmt;
 // === DECL ===
 struct VarDecl;
 struct FunctionDecl;
+struct ExternDecl;
 
 // === AST VISITOR ===
 class ASTVisitor {
@@ -60,6 +61,7 @@ public:
 
   virtual void visit(const VarDecl &node) = 0;
   virtual void visit(const FunctionDecl &node) = 0;
+  virtual void visit(const ExternDecl &node) = 0;
 };
 
 // === BASE NODE ===
@@ -282,6 +284,22 @@ struct FunctionDecl : public Node {
                elpc::SourceLocation loc)
       : name(std::move(name)), params(std::move(params)), returnType(retType),
         body(std::move(body)) {
+    this->loc = loc;
+  }
+
+  void accept(ASTVisitor &visitor) const override { visitor.visit(*this); }
+};
+
+struct ExternDecl : public Node {
+  std::string name;
+  std::vector<TokenType> paramTypes;
+  TokenType returnType;
+  bool isVariadic;
+
+  ExternDecl(std::string name, std::vector<TokenType> paramTypes,
+             TokenType retType, bool isVariadic, elpc::SourceLocation loc)
+      : name(std::move(name)), paramTypes(std::move(paramTypes)),
+        returnType(retType), isVariadic(isVariadic) {
     this->loc = loc;
   }
 

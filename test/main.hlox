@@ -1,3 +1,5 @@
+extern func i32 printf(fmt: string, ...);
+
 func i32 pow(base: i32, exp: i32) {
   if (exp < 0) {
     return 1;
@@ -16,7 +18,9 @@ func i32 start() {
   x: i32 = 2;
   y: i32 = 16;
 
-  z: i32 = pow(x, y) + 10;
+  z: i32 = pow(x, y);
+
+  printf("Hello from Hydrolox! 2^16 is equal to this: %d\n", z);
 
   return z;
 }

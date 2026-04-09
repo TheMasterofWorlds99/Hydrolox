@@ -18,6 +18,7 @@ class SemanticAnalyzer : public elpc::Sema, public AST::ASTVisitor {
   struct FuncSignature {
     TokenType retType;
     std::vector<TokenType> paramTypes;
+    bool isVariadic = false;
   };
   std::unordered_map<std::string, FuncSignature> functions;
 
@@ -138,19 +139,31 @@ public:
       error("Call to undefined function '" + node.callee + "'", node.loc);
       return;
     }
+
     auto &sig = functions[node.callee];
-    if (sig.paramTypes.size() != node.args.size()) {
-      error("Function '" + node.callee + "' expects " +
-                std::to_string(sig.paramTypes.size()) + " args",
-            node.loc);
+    if (sig.isVariadic) {
+      if (node.args.size() < sig.paramTypes.size()) {
+        error("Not enough arguments for variadic function '" + node.callee +
+                  "'",
+              node.loc);
+      }
+    } else {
+      if (sig.paramTypes.size() != node.args.size()) {
+        error("Function '" + node.callee + "' expects " +
+                  std::to_string(sig.paramTypes.size()) + " args",
+              node.loc);
+      }
     }
+
     for (size_t i = 0; i < node.args.size(); ++i) {
       node.args[i]->accept(*this);
 
-      if (isImplicitWidening(*currentExprType, sig.paramTypes[i])) {
-        // Its allowed
-      } else if (currentExprType != sig.paramTypes[i]) {
-        error("Argument type mismatch in function call", node.loc);
+      if (i < sig.paramTypes.size()) {
+        if (isImplicitWidening(*currentExprType, sig.paramTypes[i])) {
+          // Allowed
+        } else if (currentExprType != sig.paramTypes[i]) {
+          error("Argument type mismatch in function call", node.loc);
+        }
       }
     }
     currentExprType = sig.retType;
@@ -322,6 +335,10 @@ public:
     arrays.popScope();
     symbols.popScope();
     currentExpectedReturnType = std::nullopt;
+  }
+
+  void visit(const AST::ExternDecl &node) override {
+    functions[node.name] = {node.returnType, node.paramTypes, node.isVariadic};
   }
 
 private:
