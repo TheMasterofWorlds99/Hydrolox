@@ -17,7 +17,7 @@ func i32 start() {
 ---
 
 ## Current Features
-- i32, U8, U16, String and bool types
+- I32, U8, U16, String and Bool types
 - Arrays with indexing
 - For/while loops with ++/-- increments
 - Full boolean and comparison operators
