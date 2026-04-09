@@ -1,9 +1,22 @@
+func i32 pow(base: i32, exp: i32) {
+  if (exp < 0) {
+    return 1;
+  }
+
+  result: i32 = 1;
+
+  for (i: i32 = 0; i < exp; i++) {
+    result = result * base;
+  }
+
+  return result;
+}
+
 func i32 start() {
-  x: u8 = 200;
-  y: u8 = 100;
+  x: i32 = 2;
+  y: i32 = 16;
 
-  z: u8 = (u8)(x + y);
-  safe_val: i32 = x + y;
+  z: i32 = pow(x, y) + 10;
 
-  return safe_val;
+  return z;
 }

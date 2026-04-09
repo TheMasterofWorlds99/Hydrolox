@@ -1,4 +1,3 @@
-#include <astPrinter.hpp>
 #include <elpc/elpc.hpp>
 #include <fstream>
 #include <generator.hpp>
@@ -7,17 +6,72 @@
 #include <sema.hpp>
 
 #ifdef ELPC_ENABLE_LLVM
+#include <llvm/Analysis/CGSCCPassManager.h>
+#include <llvm/Analysis/LoopAnalysisManager.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Passes/OptimizationLevel.h>
+#include <llvm/Passes/PassBuilder.h>
 #endif
 
-int main(int argc, char *argv[]) {
-  std::string path = (argc > 1) ? argv[1] : "test/main.hlox";
+bool compileToObject(const std::string &inputPath,
+                     const std::string &outputPath, bool emitIR);
 
-  std::ifstream file(path);
-  if (!file.is_open()) {
-    std::cerr << "[hydrolox] Error: could not open file '" << path << "'\n";
+int main(int argc, char *argv[]) {
+  std::string inputPath =
+      ""; // Empty since the user needs to give this as the input file
+  std::string outputPath =
+      "a.out"; // Not empty, but rather has a default of a.out given that other
+               // compilers, when not given a name for the .out file, defaults
+               // to a.out
+  bool emitIR = false;
+
+  // For loop to go over all of the arguments that the user puts in for the
+  // compiler
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "-o" && i + 1 < argc) {
+      outputPath = argv[++i];
+    } else if (arg == "--emit-ir") {
+      emitIR = true;
+    } else if (arg[0] != '-') {
+      inputPath = arg;
+    } else {
+      std::cerr << "[hydrolox] error: unrecongnized command-line option '"
+                << arg << "'\n";
+      return 1;
+    }
+  }
+
+  if (inputPath.empty()) {
+    std::cerr << "[hydrolox] error: no input files\n";
     return 1;
+  }
+
+  std::string objectFile = outputPath + ".o";
+  if (!compileToObject(inputPath, objectFile, emitIR)) {
+    return 1; // Compilation failed (Errors already printed);
+  }
+
+  std::string linkCommand = "cc " + objectFile + " -o " + outputPath;
+  int linkStatus = std::system(linkCommand.c_str());
+
+  if (linkStatus != 0) {
+    std::cerr << "[hydrolox] error: linking failed\n";
+    return 1;
+  }
+
+  std::remove(objectFile.c_str());
+  return 0;
+}
+
+bool compileToObject(const std::string &inputPath,
+                     const std::string &outputPath, bool emitIR) {
+  std::ifstream file(inputPath);
+  if (!file.is_open()) {
+    std::cerr << "[hydrolox] Error: could not open file '" << inputPath
+              << "'\n";
+    return false;
   }
 
   std::ostringstream buf;
@@ -37,11 +91,11 @@ int main(int argc, char *argv[]) {
       root->accept(sema);
     }
 
-    // Stop compilation if Sema found type errors or undeclared variables!
+    // Stop compilation if Sema found type errors or undeclared variables
     if (diag.hasErrors()) {
       std::cerr << "\n=== SEMANTIC ERRORS ===\n";
       diag.reportDiagnostics(std::cerr);
-      return 1;
+      return false;
     }
 
 #ifdef ELPC_ENABLE_LLVM
@@ -59,7 +113,7 @@ int main(int argc, char *argv[]) {
     if (diag.hasErrors()) {
       std::cerr << "\n=== CODEGEN ERRORS ===\n";
       diag.reportDiagnostics(std::cerr);
-      return 1;
+      return false;
     }
 
     llvm::LoopAnalysisManager LAM;
@@ -78,21 +132,30 @@ int main(int argc, char *argv[]) {
     llvm::ModulePassManager MPM =
         PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2);
 
-    // Optimize the module! This instantly converts all your allocas to pure
-    // SSA!
     MPM.run(*mod, MAM);
 
-    std::cout << "=== LLVM IR ===\n";
-    bridge.dumpIR();
-    bridge.writeObject("output.o");
+    if (emitIR) {
+      std::cout << "=== LLVM IR ===\n";
+      bridge.dumpIR();
+    }
+
+    bridge.writeObject(outputPath);
+
+    if (diag.hasErrors()) {
+      std::cerr << "\n=== BACKEND ERRORS ===\n";
+      diag.reportDiagnostics(std::cerr);
+      return false;
+    }
+
+    std::cout << "Compiling Successful!\n";
+    return true;
 #else
     std::cout << "\n[hydrolox] LLVM disabled.\n";
+    return false;
 #endif
 
   } catch (const std::exception &e) {
     std::cerr << "\n[hydrolox] Syntax Error: " << e.what() << "\n";
-    return 1;
+    return false;
   }
-
-  return 0;
 }

@@ -1,7 +1,5 @@
 #pragma once
 
-#pragma once
-
 #include <ast.hpp>
 #include <elpc/elpc.hpp>
 #include <optional>
@@ -90,18 +88,18 @@ public:
       return;
     }
 
-    if (leftType == TokenType::I32 && rightType == TokenType::U8)
-      rightType = TokenType::I32;
-    if (leftType == TokenType::U8 && rightType == TokenType::I32)
-      leftType = TokenType::I32;
+    auto common = commonNumericType(*leftType, *rightType);
+    if (common) {
+      leftType = common;
+      rightType = common;
+    }
 
     switch (node.op) {
     case TokenType::LESS:
     case TokenType::GREATER:
     case TokenType::LESS_EQ:
     case TokenType::GREATER_EQ:
-      if ((leftType != TokenType::I32 && leftType != TokenType::U8) ||
-          rightType != TokenType::I32) {
+      if (!common) {
         error("Comparison operators require matching numeric operands",
               node.loc);
       }
@@ -122,14 +120,13 @@ public:
       currentExprType = TokenType::BOOL;
       break;
     case TokenType::PERCENT:
-      if ((leftType != TokenType::I32 && leftType != TokenType::U8) ||
-          leftType != rightType) {
+      if (!common) {
         error("'%' requires matching numeric operands", node.loc);
       }
       currentExprType = leftType;
       break;
     default:
-      if (leftType != rightType)
+      if (!common)
         error("Type mismatch in binary expression", node.loc);
       currentExprType = leftType;
       break;
@@ -150,8 +147,7 @@ public:
     for (size_t i = 0; i < node.args.size(); ++i) {
       node.args[i]->accept(*this);
 
-      if (currentExprType == TokenType::U8 &&
-          sig.paramTypes[i] == TokenType::I32) {
+      if (isImplicitWidening(*currentExprType, sig.paramTypes[i])) {
         // Its allowed
       } else if (currentExprType != sig.paramTypes[i]) {
         error("Argument type mismatch in function call", node.loc);
@@ -170,7 +166,7 @@ public:
 
     node.value->accept(*this);
     if (currentExprType && *varTypeOpt != currentExprType) {
-      if (currentExprType == TokenType::U8 && *varTypeOpt == TokenType::I32) {
+      if (isImplicitWidening(*currentExprType, *varTypeOpt)) {
         // Implicit widening (u8 -> i32) is ALLOWED
       } else {
         error("Type mismatch in assignment. Explicit cast required.", node.loc);
@@ -218,8 +214,7 @@ public:
     node.value->accept(*this);
 
     if (currentExprType && currentExpectedReturnType) {
-      if (currentExprType == TokenType::U8 &&
-          currentExpectedReturnType == TokenType::I32) {
+      if (isImplicitWidening(*currentExprType, *currentExpectedReturnType)) {
         // Allowed!
       } else if (currentExprType != currentExpectedReturnType) {
         error("Return type mismatch.", node.loc);
@@ -295,7 +290,7 @@ public:
         error("Array element type mismatch in declaration", node.loc);
     } else {
       if (currentExprType && currentExprType != node.type) {
-        if (currentExprType == TokenType::U8 && node.type == TokenType::I32) {
+        if (isImplicitWidening(*currentExprType, node.type)) {
           // Implicit widening is ALLOWED
         } else {
           error("Type mismatch in declaration. Explicit cast required.",
@@ -328,4 +323,40 @@ public:
     symbols.popScope();
     currentExpectedReturnType = std::nullopt;
   }
+
+private:
+  // This helper function returns the larger of the two numeric types, or
+  // nullopt if incompatible with each other (u8 = a, i32 = b -> b is wider)
+  std::optional<TokenType> commonNumericType(TokenType a, TokenType b) {
+
+    // Helper lambda to get the rank of the type as compared to the other types
+    // as an integer
+    auto rank = [](TokenType t) -> int {
+      if (t == TokenType::U8)
+        return 0;
+      if (t == TokenType::U16)
+        return 1;
+      if (t == TokenType::I32)
+        return 2;
+      return -1;
+    };
+
+    int ra = rank(a), rb = rank(b);
+    if (ra < 0 || rb < 0)
+      return std::nullopt; // The types aren't any of the types we listed
+                           // (non-numeric)
+    return (ra >= rb) ? a : b;
+  }
+
+  bool isImplicitWidening(TokenType from, TokenType to) {
+    if (to == TokenType::I32 &&
+        (from == TokenType::U8 || from == TokenType::U16))
+      return true;
+    if (to == TokenType::U16 && from == TokenType::U8)
+      return true;
+    // A little cheaty, but for now it works
+    if (from == TokenType::I32 && (to == TokenType::U8 || to == TokenType::U16))
+      return true;
+    return false;
+  };
 };

@@ -38,8 +38,8 @@ public:
 
     // Grouping Parenthesis && Type casting
     registerPrefix(TokenType::LEFT_PAREN, [this](const auto &tok) -> ExprNode {
-      if ((peek().isOneOf(TokenType::U8, TokenType::I32, TokenType::BOOL,
-                          TokenType::STRING)) &&
+      if ((peek().isOneOf(TokenType::U8, TokenType::U16, TokenType::I32,
+                          TokenType::BOOL, TokenType::STRING)) &&
           peek(1).is(TokenType::RIGHT_PAREN)) {
 
         auto typeTok = consume(); // Consume the type
@@ -234,9 +234,9 @@ private:
   std::unique_ptr<AST::FunctionDecl> parseFunctionDecl() {
     auto funcTok = consume(); // Consume 'func'
 
-    auto typeTok =
-        expectOneOf("Expected return type (e.g. 'i32').", TokenType::U8,
-                    TokenType::I32, TokenType::BOOL, TokenType::STRING);
+    auto typeTok = expectOneOf("Expected return type (e.g. 'i32').",
+                               TokenType::U8, TokenType::U16, TokenType::I32,
+                               TokenType::BOOL, TokenType::STRING);
     auto nameTok = expect(TokenType::IDENT, "Expected function name.");
 
     expect(TokenType::LEFT_PAREN, "Expected '(' after function name.");
@@ -246,9 +246,9 @@ private:
       do {
         auto paramName = expect(TokenType::IDENT, "Expected parameter name.");
         expect(TokenType::COLON, "Expected ':'.");
-        auto paramType =
-            expectOneOf("Expected parameter type.", TokenType::U8,
-                        TokenType::I32, TokenType::BOOL, TokenType::STRING);
+        auto paramType = expectOneOf("Expected parameter type.", TokenType::U8,
+                                     TokenType::U16, TokenType::I32,
+                                     TokenType::BOOL, TokenType::STRING);
         params.push_back({paramName.lexeme, paramType.type});
       } while (match(TokenType::COMMA));
     }
@@ -357,8 +357,8 @@ private:
     auto nameTok = consume(); // We know it's an IDENT
     expect(TokenType::COLON, "Expected ':' after variable name.");
     auto typeTok =
-        expectOneOf("Expected variable type.", TokenType::U8, TokenType::I32,
-                    TokenType::BOOL, TokenType::STRING);
+        expectOneOf("Expected variable type.", TokenType::U8, TokenType::U16,
+                    TokenType::I32, TokenType::BOOL, TokenType::STRING);
 
     std::optional<size_t> arraySize;
     if (match(TokenType::LEFT_SQ_BRACE)) {

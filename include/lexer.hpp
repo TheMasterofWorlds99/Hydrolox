@@ -13,6 +13,7 @@ enum class TokenType {
 
   // TYPES (I32, F32, etc)
   U8,
+  U16,
   I32,
   BOOL,
   STRING,
@@ -75,6 +76,7 @@ inline elpc::Lexer<TokenType> GenerateLexer(const std::string &src) {
 
   // Types
   lexer.addRule(TokenType::U8, "\\bu8\\b");
+  lexer.addRule(TokenType::U16, "\\bu16\\b");
   lexer.addRule(TokenType::I32, "\\bi32\\b");
   lexer.addRule(TokenType::BOOL, "\\bbool\\b");
   lexer.addRule(TokenType::STRING, "\\bstring\\b");

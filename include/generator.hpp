@@ -64,6 +64,8 @@ class LLVMGenerator : public AST::ASTVisitor {
     switch (type) {
     case TokenType::U8:
       return llvm::Type::getInt8Ty(ctx());
+    case TokenType::U16:
+      return llvm::Type::getInt16Ty(ctx());
     case TokenType::I32:
       return llvm::Type::getInt32Ty(ctx());
     case TokenType::BOOL:
@@ -82,14 +84,22 @@ class LLVMGenerator : public AST::ASTVisitor {
     if (srcType == destType)
       return val;
 
-    // Widening: u8 -> i32
-    if (srcType->isIntegerTy(8) && destType->isIntegerTy(32)) {
+    // Unsigned widening
+    if (srcType->isIntegerTy(8) && destType->isIntegerTy(16))
+      return b().CreateZExt(val, destType, "widen_u8_to_u16");
+    if (srcType->isIntegerTy(8) && destType->isIntegerTy(32))
       return b().CreateZExt(val, destType, "widen_u8_to_i32");
-    }
-    // Narrowing: i32 -> u8 (kept for assigning literals like x: u8 = 10;)
-    if (srcType->isIntegerTy(32) && destType->isIntegerTy(8)) {
+    if (srcType->isIntegerTy(16) && destType->isIntegerTy(32))
+      return b().CreateZExt(val, destType, "widen_u16_to_i32");
+
+    // Narrowing (explicit cast)
+    if (srcType->isIntegerTy(32) && destType->isIntegerTy(16))
+      return b().CreateTrunc(val, destType, "narrow_i32_to_u16");
+    if (srcType->isIntegerTy(32) && destType->isIntegerTy(8))
       return b().CreateTrunc(val, destType, "narrow_i32_to_u8");
-    }
+    if (srcType->isIntegerTy(16) && destType->isIntegerTy(8))
+      return b().CreateTrunc(val, destType, "narrow_u16_to_u8");
+
     return val;
   }
 
@@ -139,14 +149,21 @@ public:
       return;
 
     // IMPLICIT WIDENING BEFORE MATH
-    if (lhs->getType()->isIntegerTy(8) && rhs->getType()->isIntegerTy(32)) {
-      lhs = castIfNeeded(lhs, rhs->getType()); // Widen left to i32
-    } else if (lhs->getType()->isIntegerTy(32) &&
-               rhs->getType()->isIntegerTy(8)) {
-      rhs = castIfNeeded(rhs, lhs->getType()); // Widen right to i32
-    }
-
-    bool isU8 = lhs->getType()->isIntegerTy(8);
+    auto widenToCommon = [&](llvm::Value *&l, llvm::Value *&r) {
+      llvm::Type *lt = l->getType(), *rt = r->getType();
+      if (lt == rt)
+        return;
+      // Always widen the narrower side to the wider type
+      if (lt->isIntegerTy() && rt->isIntegerTy()) {
+        if (lt->getIntegerBitWidth() < rt->getIntegerBitWidth())
+          l = b().CreateZExt(l, rt, "widen");
+        else
+          r = b().CreateZExt(r, lt, "widen");
+      }
+    };
+    widenToCommon(lhs, rhs);
+    bool isUnsigned =
+        lhs->getType()->isIntegerTy(8) || lhs->getType()->isIntegerTy(16);
 
     switch (node.op) {
     case TokenType::PLUS:
@@ -159,33 +176,33 @@ public:
       currentValue = b().CreateMul(lhs, rhs, "mul");
       break;
     case TokenType::PERCENT:
-      currentValue = isU8 ? b().CreateURem(lhs, rhs, "mod")
-                          : b().CreateSRem(lhs, rhs, "mod");
+      currentValue = isUnsigned ? b().CreateURem(lhs, rhs, "mod")
+                                : b().CreateSRem(lhs, rhs, "mod");
       break;
     case TokenType::SLASH:
       if (auto *c = llvm::dyn_cast<llvm::ConstantInt>(rhs); c && c->isZero()) {
         bridge.error("Division by zero", node.loc);
         currentValue = constI32(0);
       } else {
-        currentValue = isU8 ? b().CreateUDiv(lhs, rhs, "div")
-                            : b().CreateSDiv(lhs, rhs, "div");
+        currentValue = isUnsigned ? b().CreateUDiv(lhs, rhs, "div")
+                                  : b().CreateSDiv(lhs, rhs, "div");
       }
       break;
     case TokenType::LESS:
-      currentValue = isU8 ? b().CreateICmpULT(lhs, rhs, "cmp")
-                          : b().CreateICmpSLT(lhs, rhs, "cmp");
+      currentValue = isUnsigned ? b().CreateICmpULT(lhs, rhs, "cmp")
+                                : b().CreateICmpSLT(lhs, rhs, "cmp");
       break;
     case TokenType::GREATER:
-      currentValue = isU8 ? b().CreateICmpUGT(lhs, rhs, "cmp")
-                          : b().CreateICmpSGT(lhs, rhs, "cmp");
+      currentValue = isUnsigned ? b().CreateICmpUGT(lhs, rhs, "cmp")
+                                : b().CreateICmpSGT(lhs, rhs, "cmp");
       break;
     case TokenType::LESS_EQ:
-      currentValue = isU8 ? b().CreateICmpULE(lhs, rhs, "cmp")
-                          : b().CreateICmpSLE(lhs, rhs, "cmp");
+      currentValue = isUnsigned ? b().CreateICmpULE(lhs, rhs, "cmp")
+                                : b().CreateICmpSLE(lhs, rhs, "cmp");
       break;
     case TokenType::GREATER_EQ:
-      currentValue = isU8 ? b().CreateICmpUGE(lhs, rhs, "cmp")
-                          : b().CreateICmpSGE(lhs, rhs, "cmp");
+      currentValue = isUnsigned ? b().CreateICmpUGE(lhs, rhs, "cmp")
+                                : b().CreateICmpSGE(lhs, rhs, "cmp");
       break;
     case TokenType::EQ_EQ:
       currentValue = b().CreateICmpEQ(lhs, rhs, "cmp");
