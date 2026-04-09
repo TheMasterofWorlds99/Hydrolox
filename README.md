@@ -8,25 +8,29 @@ it comes to scientific and graphical computing (Graphical since it can talk to t
 ```hydrolox
 func i32 start() {
   x: i32 = 5;
-  return x;
+  y: i32 = 12;
+  z: i32 = x + y;
+  return z;
 }
 ```
 
 ---
 
 ## Current Features
-- i32 and bool types
+- i32, U8, U16, String and bool types
 - Arrays with indexing
 - For/while loops with ++/-- increments
 - Full boolean and comparison operators
 - LLVM O2 optimization pipeline
+- Somewhat functional CLI
+- Extern function capabilities
 
 ## Planned Features
-- Fat Pointers (Strings)
+- Upgrade Strings to fat pointers
 - More complex data types
 - Modules
 - Easy parallelization
-- idk, other stuff
+- idk, other stuff :P
 
 ## Dependencies
 - LLVM
