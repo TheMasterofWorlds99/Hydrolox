@@ -12,3 +12,9 @@ output.o
 # Compiler output
 *.ll
 *.s
+
+#Executables
+*.exe
+*a.out
+*.out
+*main
