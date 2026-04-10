@@ -40,7 +40,7 @@ public:
   }
 
   void visit(const AST::StringLiteral &node) override {
-    currentExprType = TokenType::STRING;
+    currentExprType = TokenType::STR;
   }
 
   void visit(const AST::ArrayLiteral &node) override {
@@ -355,6 +355,8 @@ private:
         return 1;
       if (t == TokenType::I32)
         return 2;
+      if (t == TokenType::I64)
+        return 3;
       return -1;
     };
 
@@ -366,14 +368,21 @@ private:
   }
 
   bool isImplicitWidening(TokenType from, TokenType to) {
+    // Widening to I64
+    if (to == TokenType::I64 &&
+        (from == TokenType::U8 || from == TokenType::U16 ||
+         from == TokenType::I32))
+      return true;
+
+    // Widening to I32
     if (to == TokenType::I32 &&
         (from == TokenType::U8 || from == TokenType::U16))
       return true;
+
+    // Widiningto U16
     if (to == TokenType::U16 && from == TokenType::U8)
       return true;
-    // A little cheaty, but for now it works
-    if (from == TokenType::I32 && (to == TokenType::U8 || to == TokenType::U16))
-      return true;
+
     return false;
   };
 };

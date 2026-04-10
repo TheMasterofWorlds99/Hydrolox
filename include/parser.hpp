@@ -1,5 +1,6 @@
 #pragma once
 
+#include "lexer.hpp"
 #include <ast.hpp>
 #include <elpc/parser/prattParser.hpp>
 
@@ -237,9 +238,10 @@ private:
   std::unique_ptr<AST::FunctionDecl> parseFunctionDecl() {
     auto funcTok = consume(); // Consume 'func'
 
-    auto typeTok = expectOneOf("Expected return type (e.g. 'i32').",
-                               TokenType::U8, TokenType::U16, TokenType::I32,
-                               TokenType::BOOL, TokenType::STRING);
+    auto typeTok =
+        expectOneOf("Expected return type (e.g. 'i32').", TokenType::U8,
+                    TokenType::U16, TokenType::I32, TokenType::I64,
+                    TokenType::BOOL, TokenType::STRING, TokenType::STR);
     auto nameTok = expect(TokenType::IDENT, "Expected function name.");
 
     expect(TokenType::LEFT_PAREN, "Expected '(' after function name.");
@@ -249,9 +251,10 @@ private:
       do {
         auto paramName = expect(TokenType::IDENT, "Expected parameter name.");
         expect(TokenType::COLON, "Expected ':'.");
-        auto paramType = expectOneOf("Expected parameter type.", TokenType::U8,
-                                     TokenType::U16, TokenType::I32,
-                                     TokenType::BOOL, TokenType::STRING);
+        auto paramType =
+            expectOneOf("Expected parameter type.", TokenType::U8,
+                        TokenType::U16, TokenType::I32, TokenType::I64,
+                        TokenType::BOOL, TokenType::STRING, TokenType::STR);
         params.push_back({paramName.lexeme, paramType.type});
       } while (match(TokenType::COMMA));
     }
@@ -269,9 +272,9 @@ private:
     auto extTok = consume(); // Consume extern
     expect(TokenType::FUNC, "Expected 'func' after 'extern'");
 
-    auto typeTok =
-        expectOneOf("Expected Return Type", TokenType::U8, TokenType::U16,
-                    TokenType::I32, TokenType::BOOL, TokenType::STRING);
+    auto typeTok = expectOneOf(
+        "Expected Return Type", TokenType::U8, TokenType::U16, TokenType::I32,
+        TokenType::I64, TokenType::BOOL, TokenType::STRING, TokenType::STR);
     auto nameTok = expect(TokenType::IDENT, "Expected function name");
 
     expect(TokenType::LEFT_PAREN, "Expected '(' after function name");
@@ -288,9 +291,10 @@ private:
 
         expect(TokenType::IDENT, "Expected parameter name");
         expect(TokenType::COLON, "Expected ':'");
-        auto paramType = expectOneOf("Expected parameter type.", TokenType::U8,
-                                     TokenType::U16, TokenType::I32,
-                                     TokenType::BOOL, TokenType::STRING);
+        auto paramType =
+            expectOneOf("Expected parameter type.", TokenType::U8,
+                        TokenType::U16, TokenType::I32, TokenType::I64,
+                        TokenType::BOOL, TokenType::STRING, TokenType::STR);
         paramTypes.push_back(paramType.type);
       } while (match(TokenType::COMMA));
     }
@@ -399,7 +403,8 @@ private:
     expect(TokenType::COLON, "Expected ':' after variable name.");
     auto typeTok =
         expectOneOf("Expected variable type.", TokenType::U8, TokenType::U16,
-                    TokenType::I32, TokenType::BOOL, TokenType::STRING);
+                    TokenType::I32, TokenType::I64, TokenType::BOOL,
+                    TokenType::STRING, TokenType::STR);
 
     std::optional<size_t> arraySize;
     if (match(TokenType::LEFT_SQ_BRACE)) {

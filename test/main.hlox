@@ -1,26 +1,10 @@
-extern func i32 printf(fmt: string, ...);
-
-func i32 pow(base: i32, exp: i32) {
-  if (exp < 0) {
-    return 1;
-  }
-
-  result: i32 = 1;
-
-  for (i: i32 = 0; i < exp; i++) {
-    result = result * base;
-  }
-
-  return result;
-}
+extern func i32 printf(fmt: str, ...); // Takes a fat pointer, but 
+                                       // unwraps it to C during the code Generation
 
 func i32 start() {
-  x: i32 = 2;
-  y: i32 = 16;
-
-  z: i32 = pow(x, y);
-
-  printf("Hello from Hydrolox! 2^16 is equal to this: %d\n", z);
-
-  return z;
+    x: i32 = 10;
+    msg: str = "Score: %d\n"; 
+    
+    printf(msg, x);
+    return 0;
 }

@@ -68,10 +68,19 @@ class LLVMGenerator : public AST::ASTVisitor {
       return llvm::Type::getInt16Ty(ctx());
     case TokenType::I32:
       return llvm::Type::getInt32Ty(ctx());
+    case TokenType::I64:
+      return llvm::Type::getInt64Ty(ctx());
     case TokenType::BOOL:
       return llvm::Type::getInt1Ty(ctx());
+    case TokenType::STR:
+      // Fat Pointer/Slice
+      return llvm::StructType::get(ctx(), {llvm::PointerType::getUnqual(ctx()),
+                                           llvm::Type::getInt64Ty(ctx())});
     case TokenType::STRING:
-      return llvm::PointerType::getUnqual(ctx());
+      // Dynamic Buffer: { ptr, i64, i64 }
+      return llvm::StructType::get(ctx(), {llvm::PointerType::getUnqual(ctx()),
+                                           llvm::Type::getInt64Ty(ctx()),
+                                           llvm::Type::getInt64Ty(ctx())});
     default:
       throw std::runtime_error("Unknown type");
     }
@@ -91,6 +100,12 @@ class LLVMGenerator : public AST::ASTVisitor {
       return b().CreateZExt(val, destType, "widen_u8_to_i32");
     if (srcType->isIntegerTy(16) && destType->isIntegerTy(32))
       return b().CreateZExt(val, destType, "widen_u16_to_i32");
+    if (srcType->isIntegerTy(8) && destType->isIntegerTy(64))
+      return b().CreateZExt(val, destType);
+    if (srcType->isIntegerTy(16) && destType->isIntegerTy(64))
+      return b().CreateZExt(val, destType);
+    if (srcType->isIntegerTy(32) && destType->isIntegerTy(64))
+      return b().CreateZExt(val, destType);
 
     // Narrowing (explicit cast)
     if (srcType->isIntegerTy(32) && destType->isIntegerTy(16))
@@ -117,7 +132,22 @@ public:
   }
 
   void visit(const AST::StringLiteral &node) override {
-    currentValue = b().CreateGlobalString(node.value, "str");
+    // Create the raw C-style string in memory
+    llvm::Value *rawStr = b().CreateGlobalString(node.value, "str_raw");
+
+    // Get the length of the string as an i64
+    llvm::Value *strLen = llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx()),
+                                                 node.value.length(), false);
+
+    // Create the fat pointer struct
+    llvm::Type *strTy = toLLVMType(TokenType::STR);
+    llvm::Value *fatPtr = llvm::UndefValue::get(strTy);
+
+    // Insrert the pointer and length into said struct
+    fatPtr = b().CreateInsertValue(fatPtr, rawStr, 0); // Index 0 is the pointer
+    fatPtr = b().CreateInsertValue(fatPtr, strLen, 1); // Index 1 is the length
+
+    currentValue = fatPtr;
   }
 
   void visit(const AST::ArrayLiteral &node) override {
@@ -244,10 +274,14 @@ public:
         llvm::Type *expectedType = fnType->getParamType(i);
         argVal = castIfNeeded(argVal, expectedType);
       } else {
-        // This is a variadic argument (...)
-        // Standard C ABI dictates small ints are promoted to 32-bit in varargs
-        llvm::Type *argLLVMType = argVal->getType();
-        if (argLLVMType->isIntegerTy(8) || argLLVMType->isIntegerTy(16)) {
+        // If this is an extern function (has no body in Hydrolox) and we are
+        // passing a struct (str/string)
+        if (fn->isDeclaration() && argVal->getType()->isStructTy()) {
+          // Extract the raw pointer (Index 0) to pass to C
+          argVal = b().CreateExtractValue(argVal, 0, "raw_c_str");
+        } else if (argVal->getType()->isIntegerTy(8) ||
+                   argVal->getType()->isIntegerTy(16)) {
+          // C vararg promotion (u8/u16 -> i32)
           argVal = b().CreateZExt(argVal, llvm::Type::getInt32Ty(ctx()),
                                   "vararg_prom");
         }
