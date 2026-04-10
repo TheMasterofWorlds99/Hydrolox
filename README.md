@@ -17,7 +17,7 @@ func i32 start() {
 ---
 
 ## Current Features
-- I32, U8, U16, String and Bool types
+- I32, U8, U16, String/Str and Bool types
 - Arrays with indexing
 - For/while loops with ++/-- increments
 - Full boolean and comparison operators
@@ -26,7 +26,7 @@ func i32 start() {
 - Extern function capabilities
 
 ## Planned Features
-- Upgrade Strings to fat pointers
+- Adding more CLI functionality
 - More complex data types
 - Modules
 - Easy parallelization
