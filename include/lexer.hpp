@@ -1,71 +1,7 @@
 #pragma once
 
 #include <elpc/elpc.hpp>
-
-enum class TokenType {
-  // KEYWORDS
-  FUNC,
-  EXTERN,
-  RETURN,
-  IF,
-  ELSE,
-  WHILE,
-  FOR,
-
-  // TYPES (I32, F32, etc)
-  U8,
-  U16,
-  I32,
-  I64,
-  BOOL,
-  STRING,
-  STR,
-
-  // LITERALS (2, 3.141, 3.1i, etc)
-  INT_LIT,
-  BOOL_LIT,
-  STRING_LIT,
-
-  // SYMBOLS
-  LEFT_PAREN,
-  RIGHT_PAREN,
-  COLON,
-  SEMICOLON,
-  COMMA,
-  EQUAL,
-  LEFT_BRACE,
-  RIGHT_BRACE,
-  LEFT_SQ_BRACE,
-  RIGHT_SQ_BRACE,
-  BANG,
-  PERCENT,
-  TRIPLEDOT,
-
-  // OPERATORS
-  PLUS,
-  MINUS,
-  STAR,
-  SLASH,
-
-  //-Crements
-  PLUS_PLUS,
-  MINUS_MINUS,
-
-  // COMPARISONS
-  LESS,
-  GREATER,
-  LESS_EQ,
-  GREATER_EQ,
-  EQ_EQ,
-  NOT_EQ,
-
-  // LOGICAL OPERATORS
-  AND,
-  OR,
-
-  // IDENTIFIER
-  IDENT
-};
+#include <types.hpp>
 
 inline elpc::Lexer<TokenType> GenerateLexer(const std::string &src) {
   elpc::Lexer<TokenType> lexer(src);
@@ -78,18 +14,22 @@ inline elpc::Lexer<TokenType> GenerateLexer(const std::string &src) {
   lexer.addRule(TokenType::ELSE, "\\belse\\b");
   lexer.addRule(TokenType::WHILE, "\\bwhile\\b");
   lexer.addRule(TokenType::FOR, "\\bfor\\b");
+  lexer.addRule(TokenType::STRUCT, "\\bstruct\\b");
 
   // Types
   lexer.addRule(TokenType::U8, "\\bu8\\b");
   lexer.addRule(TokenType::U16, "\\bu16\\b");
   lexer.addRule(TokenType::I32, "\\bi32\\b");
   lexer.addRule(TokenType::I64, "\\bi64\\b");
+  lexer.addRule(TokenType::F32, "\\bf32\\b");
+  lexer.addRule(TokenType::F64, "\\bf64\\b");
   lexer.addRule(TokenType::BOOL, "\\bbool\\b");
   lexer.addRule(TokenType::STRING, "\\bstring\\b");
   lexer.addRule(TokenType::STR, "\\bstr\\b");
 
   // Literals
   lexer.addRule(TokenType::INT_LIT, "\\b[0-9]+\\b");
+  lexer.addRule(TokenType::FLOAT_LIT, "\\b[0-9]+\\.[0-9]+\\b");
   lexer.addRule(TokenType::BOOL_LIT, "\\b(true|false)\\b");
   lexer.addRule(TokenType::STRING_LIT, "\"([^\"]*)\"");
 
@@ -125,6 +65,7 @@ inline elpc::Lexer<TokenType> GenerateLexer(const std::string &src) {
   lexer.addRule(TokenType::BANG, "\\!");
   lexer.addRule(TokenType::PERCENT, "\\%");
   lexer.addRule(TokenType::TRIPLEDOT, "\\.\\.\\.");
+  lexer.addRule(TokenType::DOT, "\\.");
 
   // Logical Operators
   lexer.addRule(TokenType::AND, "&&");

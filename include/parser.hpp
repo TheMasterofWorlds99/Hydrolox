@@ -1,8 +1,8 @@
 #pragma once
 
-#include "lexer.hpp"
 #include <ast.hpp>
 #include <elpc/parser/prattParser.hpp>
+#include <memory>
 
 class HydroloxParser
     : public elpc::PrattParser<TokenType, std::unique_ptr<AST::Expr>> {
@@ -20,6 +20,12 @@ public:
                                                tok.location);
     });
 
+    // Float Literals
+    registerPrefix(TokenType::FLOAT_LIT, [this](const auto &tok) -> ExprNode {
+      return std::make_unique<AST::FloatLiteral>(std::stod(tok.lexeme),
+                                                 tok.location);
+    });
+
     // Boolean Literals
     registerPrefix(TokenType::BOOL_LIT, [this](const auto &tok) -> ExprNode {
       bool val = (tok.lexeme == "true");
@@ -35,21 +41,38 @@ public:
 
     // Identifiers (Variables)
     registerPrefix(TokenType::IDENT, [this](const auto &tok) -> ExprNode {
+      if (peek().is(TokenType::LEFT_BRACE) && peek(1).is(TokenType::IDENT) &&
+          peek(2).is(TokenType::COLON)) {
+        consume(); // consume '{'
+        std::vector<std::pair<std::string, ExprNode>> fields;
+        while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
+          auto nameTok = expect(TokenType::IDENT, "Expected field name");
+          expect(TokenType::COLON, "Expected ':' after field name");
+          auto val = parseExpression(elpc::Precedence::NONE);
+          fields.emplace_back(nameTok.lexeme, std::move(val));
+          if (!match(TokenType::COMMA))
+            break;
+        }
+        expect(TokenType::RIGHT_BRACE, "Expected '}' after struct literal");
+        return std::make_unique<AST::StructLiteral>(
+            tok.lexeme, std::move(fields), tok.location);
+      }
       return std::make_unique<AST::Identifier>(tok.lexeme, tok.location);
     });
 
     // Grouping Parenthesis && Type casting
     registerPrefix(TokenType::LEFT_PAREN, [this](const auto &tok) -> ExprNode {
       if ((peek().isOneOf(TokenType::U8, TokenType::U16, TokenType::I32,
-                          TokenType::BOOL, TokenType::STRING)) &&
+                          TokenType::I64, TokenType::F32, TokenType::F64,
+                          TokenType::BOOL, TokenType::STRING,
+                          TokenType::STR)) &&
           peek(1).is(TokenType::RIGHT_PAREN)) {
 
-        auto typeTok = consume(); // Consume the type
-        consume();                // Consume ')'
+        TypeInfo castType = parseType(); // Parses the type
+        consume();                       // Consume ')'
 
-        // UNARY precedence ensures `(u8)x + y` casts `x`, not `x + y`
         auto expr = parseExpression(elpc::Precedence::UNARY);
-        return std::make_unique<AST::CastExpr>(typeTok.type, std::move(expr),
+        return std::make_unique<AST::CastExpr>(castType, std::move(expr),
                                                tok.location);
       }
 
@@ -57,6 +80,15 @@ public:
       expect(TokenType::RIGHT_PAREN, "Expected ')' after expression.");
       return expr;
     });
+
+    // Member access
+    registerInfix(TokenType::DOT, elpc::Precedence::PRIMARY,
+                  [this](const auto &tok, ExprNode lhs) -> ExprNode {
+                    auto fieldTok = expect(TokenType::IDENT,
+                                           "Expected field name after '.'");
+                    return std::make_unique<AST::MemberAccessExpr>(
+                        std::move(lhs), fieldTok.lexeme, tok.location);
+                  });
 
     registerPrefix(
         TokenType::LEFT_SQ_BRACE, [this](const auto &tok) -> ExprNode {
@@ -180,17 +212,26 @@ public:
                         tok.type, std::move(lhs), std::move(rhs), tok.location);
                   });
 
-    registerInfix(TokenType::EQUAL, elpc::Precedence::ASSIGNMENT,
-                  [this](const auto &tok, ExprNode lhs) -> ExprNode {
-                    auto *ident = dynamic_cast<AST::Identifier *>(lhs.get());
-                    if (!ident)
-                      throw std::runtime_error("Invalid assignment target.");
+    registerInfix(
+        TokenType::EQUAL, elpc::Precedence::ASSIGNMENT,
+        [this](const auto &tok, ExprNode lhs) -> ExprNode {
+          if (auto *mem = dynamic_cast<AST::MemberAccessExpr *>(lhs.get())) {
+            auto *obj = dynamic_cast<AST::Identifier *>(mem->object.get());
+            if (!obj)
+              throw std::runtime_error("Invalid assignment target.");
+            auto rhs = parseExpression(elpc::Precedence::NONE);
+            return std::make_unique<AST::MemberAssignExpr>(
+                obj->name, mem->field, std::move(rhs), tok.location);
+          }
 
-                    // Evaluate the right side of the equals sign
-                    auto rhs = parseExpression(elpc::Precedence::NONE);
-                    return std::make_unique<AST::AssignExpr>(
-                        ident->name, std::move(rhs), tok.location);
-                  });
+          // Plain variable assignment: x = expr
+          auto *ident = dynamic_cast<AST::Identifier *>(lhs.get());
+          if (!ident)
+            throw std::runtime_error("Invalid assignment target.");
+          auto rhs = parseExpression(elpc::Precedence::NONE);
+          return std::make_unique<AST::AssignExpr>(ident->name, std::move(rhs),
+                                                   tok.location);
+        });
 
     registerInfix(
         TokenType::LEFT_PAREN, elpc::Precedence::PRIMARY,
@@ -224,6 +265,8 @@ public:
         program.push_back(parseFunctionDecl());
       } else if (check(TokenType::EXTERN)) {
         program.push_back(parseExternDecl());
+      } else if (check(TokenType::STRUCT)) {
+        program.push_back(parseStructDecl());
       } else {
         auto t = peek();
         throw std::runtime_error("[hydrolox] Only function/extern declarations "
@@ -238,24 +281,18 @@ private:
   std::unique_ptr<AST::FunctionDecl> parseFunctionDecl() {
     auto funcTok = consume(); // Consume 'func'
 
-    auto typeTok =
-        expectOneOf("Expected return type (e.g. 'i32').", TokenType::U8,
-                    TokenType::U16, TokenType::I32, TokenType::I64,
-                    TokenType::BOOL, TokenType::STRING, TokenType::STR);
+    TypeInfo typeTok = parseType();
     auto nameTok = expect(TokenType::IDENT, "Expected function name.");
 
     expect(TokenType::LEFT_PAREN, "Expected '(' after function name.");
 
-    std::vector<std::pair<std::string, TokenType>> params;
+    std::vector<std::pair<std::string, TypeInfo>> params;
     if (!check(TokenType::RIGHT_PAREN)) {
       do {
         auto paramName = expect(TokenType::IDENT, "Expected parameter name.");
         expect(TokenType::COLON, "Expected ':'.");
-        auto paramType =
-            expectOneOf("Expected parameter type.", TokenType::U8,
-                        TokenType::U16, TokenType::I32, TokenType::I64,
-                        TokenType::BOOL, TokenType::STRING, TokenType::STR);
-        params.push_back({paramName.lexeme, paramType.type});
+        auto paramType = parseType();
+        params.push_back({paramName.lexeme, paramType});
       } while (match(TokenType::COMMA));
     }
 
@@ -264,7 +301,7 @@ private:
     auto body = parseBlock();
 
     return std::make_unique<AST::FunctionDecl>(
-        nameTok.lexeme, std::move(params), typeTok.type, std::move(body),
+        nameTok.lexeme, std::move(params), typeTok, std::move(body),
         funcTok.location);
   }
 
@@ -272,14 +309,12 @@ private:
     auto extTok = consume(); // Consume extern
     expect(TokenType::FUNC, "Expected 'func' after 'extern'");
 
-    auto typeTok = expectOneOf(
-        "Expected Return Type", TokenType::U8, TokenType::U16, TokenType::I32,
-        TokenType::I64, TokenType::BOOL, TokenType::STRING, TokenType::STR);
+    TypeInfo typeTok = parseType();
     auto nameTok = expect(TokenType::IDENT, "Expected function name");
 
     expect(TokenType::LEFT_PAREN, "Expected '(' after function name");
 
-    std::vector<TokenType> paramTypes;
+    std::vector<TypeInfo> paramTypes;
     bool isVariadic = false;
 
     if (!check(TokenType::RIGHT_PAREN)) {
@@ -291,20 +326,38 @@ private:
 
         expect(TokenType::IDENT, "Expected parameter name");
         expect(TokenType::COLON, "Expected ':'");
-        auto paramType =
-            expectOneOf("Expected parameter type.", TokenType::U8,
-                        TokenType::U16, TokenType::I32, TokenType::I64,
-                        TokenType::BOOL, TokenType::STRING, TokenType::STR);
-        paramTypes.push_back(paramType.type);
+
+        paramTypes.push_back(parseType());
       } while (match(TokenType::COMMA));
     }
 
     expect(TokenType::RIGHT_PAREN, "Expected ')' after parameters");
     expect(TokenType::SEMICOLON, "Expected ';' after extern declaration");
 
-    return std::make_unique<AST::ExternDecl>(
-        nameTok.lexeme, std::move(paramTypes), typeTok.type, isVariadic,
-        extTok.location);
+    return std::make_unique<AST::ExternDecl>(nameTok.lexeme,
+                                             std::move(paramTypes), typeTok,
+                                             isVariadic, extTok.location);
+  }
+
+  std::unique_ptr<AST::StructDecl> parseStructDecl() {
+    auto structTok = consume(); // consume 'struct'
+    auto nameTok = expect(TokenType::IDENT, "Expected struct name");
+    expect(TokenType::LEFT_BRACE, "Expected '{' after struct name");
+
+    std::vector<std::pair<std::string, TypeInfo>> fields;
+    while (!check(TokenType::RIGHT_BRACE) && !isAtEnd()) {
+      auto fieldName = expect(TokenType::IDENT, "Expected field name");
+      expect(TokenType::COLON, "Expected ':' after field name");
+
+      TypeInfo fieldType = parseType();
+
+      expect(TokenType::SEMICOLON, "Expected ';' after field declaration");
+      fields.emplace_back(fieldName.lexeme, fieldType);
+    }
+
+    expect(TokenType::RIGHT_BRACE, "Expected '}' after struct body");
+    return std::make_unique<AST::StructDecl>(nameTok.lexeme, std::move(fields),
+                                             structTok.location);
   }
 
   std::unique_ptr<AST::BlockStmt> parseBlock() {
@@ -401,25 +454,15 @@ private:
   std::unique_ptr<AST::VarDecl> parseVarDecl() {
     auto nameTok = consume(); // We know it's an IDENT
     expect(TokenType::COLON, "Expected ':' after variable name.");
-    auto typeTok =
-        expectOneOf("Expected variable type.", TokenType::U8, TokenType::U16,
-                    TokenType::I32, TokenType::I64, TokenType::BOOL,
-                    TokenType::STRING, TokenType::STR);
 
-    std::optional<size_t> arraySize;
-    if (match(TokenType::LEFT_SQ_BRACE)) {
-      auto sizeTok = expect(TokenType::INT_LIT, "Expected array size.");
-      arraySize = static_cast<size_t>(sizeTok.toInt().value_or(0));
-      expect(TokenType::RIGHT_SQ_BRACE, "Expected ']' after array size.");
-    }
+    TypeInfo type = parseType();
 
     expect(TokenType::EQUAL, "Expected '=' after type.");
 
     auto init = parseExpression(elpc::Precedence::NONE);
     expect(TokenType::SEMICOLON, "Expected ';' after variable declaration.");
 
-    return std::make_unique<AST::VarDecl>(nameTok.lexeme, typeTok.type,
-                                          arraySize, std::move(init),
+    return std::make_unique<AST::VarDecl>(nameTok.lexeme, type, std::move(init),
                                           nameTok.location);
   }
 
@@ -462,5 +505,30 @@ private:
       }
     }
     return out;
+  }
+
+  TypeInfo parseType() {
+    if (check(TokenType::IDENT)) {
+      auto nameTok = consume();
+      return TypeInfo{StructType{nameTok.lexeme}};
+    }
+
+    auto typeTok = expectOneOf("Expected type.", TokenType::U8, TokenType::U16,
+                               TokenType::I32, TokenType::I64, TokenType::F32,
+                               TokenType::F64, TokenType::BOOL,
+                               TokenType::STRING, TokenType::STR);
+
+    TypeInfo baseType = TypeInfo{PrimitiveType{typeTok.type}};
+
+    // Check if it's an array like i32[4]
+    if (match(TokenType::LEFT_SQ_BRACE)) {
+      auto sizeTok = expect(TokenType::INT_LIT, "Expected array size.");
+      int size = std::stoi(sizeTok.lexeme);
+      expect(TokenType::RIGHT_SQ_BRACE, "Expected ']' after array size.");
+
+      return TypeInfo{ArrayType{std::make_shared<TypeInfo>(baseType), size}};
+    }
+
+    return baseType;
   }
 };

@@ -30,7 +30,7 @@ target_compile_definitions(elpc INTERFACE ELPC_ENABLE_LLVM)
 # Compiler executable
 # ----------------------------------------------------------------
 
-add_executable(hydrolox src/main.cpp)
+add_executable(hydrolox src/main.cpp src/types.cpp)
 
 target_include_directories(hydrolox
     PRIVATE

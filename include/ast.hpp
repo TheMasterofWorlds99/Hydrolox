@@ -3,17 +3,18 @@
 #include "elpc/core/loc.hpp"
 #include <cstdint>
 #include <elpc/elpc.hpp>
-#include <lexer.hpp>
 #include <memory>
-#include <optional>
+#include <types.hpp>
 
 namespace AST {
 
 // === LITERAL ===
 struct IntLiteral;
+struct FloatLiteral;
 struct BoolLiteral;
 struct StringLiteral;
 struct ArrayLiteral;
+struct StructLiteral;
 struct Identifier;
 
 // === EXPR ===
@@ -22,6 +23,8 @@ struct CallExpr;
 struct AssignExpr;
 struct IndexExpr;
 struct CastExpr;
+struct MemberAccessExpr;
+struct MemberAssignExpr;
 
 // === STMT ===
 struct ExprStmt;
@@ -35,15 +38,18 @@ struct ForStmt;
 struct VarDecl;
 struct FunctionDecl;
 struct ExternDecl;
+struct StructDecl;
 
 // === AST VISITOR ===
 class ASTVisitor {
 public:
   virtual ~ASTVisitor() = default;
   virtual void visit(const IntLiteral &node) = 0;
+  virtual void visit(const FloatLiteral &node) = 0;
   virtual void visit(const BoolLiteral &node) = 0;
   virtual void visit(const StringLiteral &node) = 0;
   virtual void visit(const ArrayLiteral &node) = 0;
+  virtual void visit(const StructLiteral &node) = 0;
   virtual void visit(const Identifier &node) = 0;
 
   virtual void visit(const BinaryExpr &node) = 0;
@@ -51,6 +57,8 @@ public:
   virtual void visit(const AssignExpr &node) = 0;
   virtual void visit(const IndexExpr &node) = 0;
   virtual void visit(const CastExpr &node) = 0;
+  virtual void visit(const MemberAccessExpr &node) = 0;
+  virtual void visit(const MemberAssignExpr &node) = 0;
 
   virtual void visit(const ExprStmt &node) = 0;
   virtual void visit(const ReturnStmt &node) = 0;
@@ -62,6 +70,7 @@ public:
   virtual void visit(const VarDecl &node) = 0;
   virtual void visit(const FunctionDecl &node) = 0;
   virtual void visit(const ExternDecl &node) = 0;
+  virtual void visit(const StructDecl &node) = 0;
 };
 
 // === BASE NODE ===
@@ -78,6 +87,16 @@ struct IntLiteral : public Expr {
   int32_t value;
 
   IntLiteral(int32_t val, elpc::SourceLocation loc) : value(val) {
+    this->loc = loc;
+  }
+
+  void accept(ASTVisitor &visitor) const override { visitor.visit(*this); }
+};
+
+struct FloatLiteral : public Expr {
+  double value; // Using double safely covers both f32 and f64 bounds
+
+  FloatLiteral(double val, elpc::SourceLocation loc) : value(val) {
     this->loc = loc;
   }
 
@@ -113,6 +132,21 @@ struct ArrayLiteral : public Expr {
       : elements(std::move(elements)) {
     this->loc = loc;
   }
+  void accept(ASTVisitor &visitor) const override { visitor.visit(*this); }
+};
+
+struct StructLiteral : public Expr {
+  std::string typeName;
+  std::vector<std::pair<std::string, std::unique_ptr<Expr>>> fields;
+
+  StructLiteral(
+      std::string typeName,
+      std::vector<std::pair<std::string, std::unique_ptr<Expr>>> fields,
+      elpc::SourceLocation loc)
+      : typeName(std::move(typeName)), fields(std::move(fields)) {
+    this->loc = loc;
+  }
+
   void accept(ASTVisitor &visitor) const override { visitor.visit(*this); }
 };
 
@@ -180,14 +214,42 @@ struct IndexExpr : public Expr {
 };
 
 struct CastExpr : public Expr {
-  TokenType targetType;
+  TypeInfo targetType;
   std::unique_ptr<Expr> expr;
 
-  CastExpr(TokenType targetType, std::unique_ptr<Expr> expr,
+  CastExpr(TypeInfo targetType, std::unique_ptr<Expr> expr,
            elpc::SourceLocation loc)
       : targetType(targetType), expr(std::move(expr)) {
     this->loc = loc;
   }
+  void accept(ASTVisitor &visitor) const override { visitor.visit(*this); }
+};
+
+struct MemberAccessExpr : public Expr {
+  std::unique_ptr<Expr> object;
+  std::string field;
+
+  MemberAccessExpr(std::unique_ptr<Expr> object, std::string field,
+                   elpc::SourceLocation loc)
+      : object(std::move(object)), field(std::move(field)) {
+    this->loc = loc;
+  }
+
+  void accept(ASTVisitor &visitor) const override { visitor.visit(*this); }
+};
+
+struct MemberAssignExpr : public Expr {
+  std::string objectName;
+  std::string field;
+  std::unique_ptr<Expr> value;
+
+  MemberAssignExpr(std::string objectName, std::string field,
+                   std::unique_ptr<Expr> value, elpc::SourceLocation loc)
+      : objectName(std::move(objectName)), field(std::move(field)),
+        value(std::move(value)) {
+    this->loc = loc;
+  }
+
   void accept(ASTVisitor &visitor) const override { visitor.visit(*this); }
 };
 
@@ -257,30 +319,27 @@ struct WhileStmt : public Stmt {
 // === DECLS ===
 struct VarDecl : public Stmt {
   std::string name;
-  TokenType type;
-  std::optional<size_t> arraySize;
+  TypeInfo type;
   std::unique_ptr<Expr> initializer;
 
-  VarDecl(std::string name, TokenType type, std::optional<size_t> arraySize,
-          std::unique_ptr<Expr> init, elpc::SourceLocation loc)
-      : name(std::move(name)), type(type), arraySize(arraySize),
-        initializer(std::move(init)) {
+  VarDecl(std::string name, TypeInfo type, std::unique_ptr<Expr> init,
+          elpc::SourceLocation loc)
+      : name(std::move(name)), type(type), initializer(std::move(init)) {
     this->loc = loc;
   }
 
-  bool isArray() const { return arraySize.has_value(); }
   void accept(ASTVisitor &visitor) const override { visitor.visit(*this); }
 };
 
 struct FunctionDecl : public Node {
   std::string name;
-  std::vector<std::pair<std::string, TokenType>> params;
-  TokenType returnType;
+  std::vector<std::pair<std::string, TypeInfo>> params;
+  TypeInfo returnType;
   std::unique_ptr<BlockStmt> body;
 
   FunctionDecl(std::string name,
-               std::vector<std::pair<std::string, TokenType>> params,
-               TokenType retType, std::unique_ptr<BlockStmt> body,
+               std::vector<std::pair<std::string, TypeInfo>> params,
+               TypeInfo retType, std::unique_ptr<BlockStmt> body,
                elpc::SourceLocation loc)
       : name(std::move(name)), params(std::move(params)), returnType(retType),
         body(std::move(body)) {
@@ -292,17 +351,30 @@ struct FunctionDecl : public Node {
 
 struct ExternDecl : public Node {
   std::string name;
-  std::vector<TokenType> paramTypes;
-  TokenType returnType;
+  std::vector<TypeInfo> paramTypes;
+  TypeInfo returnType;
   bool isVariadic;
 
-  ExternDecl(std::string name, std::vector<TokenType> paramTypes,
-             TokenType retType, bool isVariadic, elpc::SourceLocation loc)
+  ExternDecl(std::string name, std::vector<TypeInfo> paramTypes,
+             TypeInfo retType, bool isVariadic, elpc::SourceLocation loc)
       : name(std::move(name)), paramTypes(std::move(paramTypes)),
         returnType(retType), isVariadic(isVariadic) {
     this->loc = loc;
   }
 
+  void accept(ASTVisitor &visitor) const override { visitor.visit(*this); }
+};
+
+struct StructDecl : public Node {
+  std::string name;
+  std::vector<std::pair<std::string, TypeInfo>> fields;
+
+  StructDecl(std::string name,
+             std::vector<std::pair<std::string, TypeInfo>> fields,
+             elpc::SourceLocation loc)
+      : name(std::move(name)), fields(std::move(fields)) {
+    this->loc = loc;
+  }
   void accept(ASTVisitor &visitor) const override { visitor.visit(*this); }
 };
 

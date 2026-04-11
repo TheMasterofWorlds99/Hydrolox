@@ -46,6 +46,12 @@ class LLVMGenerator : public AST::ASTVisitor {
   ArrayTable arrays;
   std::vector<llvm::Value *> lastArrayElements;
 
+  std::unordered_map<std::string,
+                     std::pair<llvm::StructType *, std::vector<std::string>>>
+      structTypes;
+  std::unordered_map<std::string, std::string> varToStructType;
+  std::unordered_map<std::string, llvm::Value *> structVarAllocas;
+
   auto &b() { return bridge.getBuilder(); }
 
   llvm::LLVMContext &ctx() { return bridge.getContext(); }
@@ -70,12 +76,13 @@ class LLVMGenerator : public AST::ASTVisitor {
       return llvm::Type::getInt32Ty(ctx());
     case TokenType::I64:
       return llvm::Type::getInt64Ty(ctx());
+    case TokenType::F32:
+      return llvm::Type::getFloatTy(ctx());
+    case TokenType::F64:
+      return llvm::Type::getDoubleTy(ctx());
     case TokenType::BOOL:
       return llvm::Type::getInt1Ty(ctx());
     case TokenType::STR:
-      // Fat Pointer/Slice
-      return llvm::StructType::get(ctx(), {llvm::PointerType::getUnqual(ctx()),
-                                           llvm::Type::getInt64Ty(ctx())});
     case TokenType::STRING:
       // Dynamic Buffer: { ptr, i64, i64 }
       return llvm::StructType::get(ctx(), {llvm::PointerType::getUnqual(ctx()),
@@ -86,6 +93,27 @@ class LLVMGenerator : public AST::ASTVisitor {
     }
   }
 
+  llvm::Type *toLLVMType(const TypeInfo &type) {
+    return std::visit(
+        overloaded{
+            [&](const PrimitiveType &p) -> llvm::Type * {
+              return toLLVMType(p.tag);
+            },
+            [&](const ArrayType &a) -> llvm::Type * {
+              return llvm::ArrayType::get(toLLVMType(*a.base), a.size);
+            },
+            [&](const VectorType &v) -> llvm::Type * {
+              return llvm::FixedVectorType::get(toLLVMType(*v.base), v.size);
+            },
+            [&](const StructType &s) -> llvm::Type * {
+              auto it = structTypes.find(s.name);
+              if (it == structTypes.end())
+                throw std::runtime_error("Unknown struct type: " + s.name);
+              return it->second.first;
+            }},
+        type.data);
+  }
+
   llvm::Value *castIfNeeded(llvm::Value *val, llvm::Type *destType) {
     if (!val)
       return nullptr;
@@ -93,25 +121,52 @@ class LLVMGenerator : public AST::ASTVisitor {
     if (srcType == destType)
       return val;
 
+    bool srcIsFloat = srcType->isFloatingPointTy();
+    bool destIsFloat = destType->isFloatingPointTy();
+
+    // Float <-> Float
+    if (srcIsFloat && destIsFloat) {
+      if (srcType->isFloatTy() && destType->isDoubleTy())
+        return b().CreateFPExt(val, destType, "fpext");
+      if (srcType->isDoubleTy() && destType->isFloatTy())
+        return b().CreateFPTrunc(val, destType, "fptrunc");
+    }
+    // Int -> Float
+    else if (!srcIsFloat && destIsFloat) {
+      bool srcIsUnsigned = srcType->isIntegerTy(8) || srcType->isIntegerTy(16);
+      return srcIsUnsigned ? b().CreateUIToFP(val, destType, "uitofp")
+                           : b().CreateSIToFP(val, destType, "sitofp");
+    }
+    // Float -> Int
+    else if (srcIsFloat && !destIsFloat) {
+      bool destIsUnsigned =
+          destType->isIntegerTy(8) || destType->isIntegerTy(16);
+      return destIsUnsigned ? b().CreateFPToUI(val, destType, "fptoui")
+                            : b().CreateFPToSI(val, destType, "fptosi");
+    }
+
     // Unsigned widening
     if (srcType->isIntegerTy(8) && destType->isIntegerTy(16))
       return b().CreateZExt(val, destType, "widen_u8_to_u16");
+
     if (srcType->isIntegerTy(8) && destType->isIntegerTy(32))
       return b().CreateZExt(val, destType, "widen_u8_to_i32");
     if (srcType->isIntegerTy(16) && destType->isIntegerTy(32))
       return b().CreateZExt(val, destType, "widen_u16_to_i32");
+
     if (srcType->isIntegerTy(8) && destType->isIntegerTy(64))
-      return b().CreateZExt(val, destType);
+      return b().CreateZExt(val, destType, "widen_u8_to_i64");
     if (srcType->isIntegerTy(16) && destType->isIntegerTy(64))
-      return b().CreateZExt(val, destType);
+      return b().CreateZExt(val, destType, "widen_u16_to_i64");
     if (srcType->isIntegerTy(32) && destType->isIntegerTy(64))
-      return b().CreateZExt(val, destType);
+      return b().CreateSExt(val, destType, "widen_i32_to_i64");
 
     // Narrowing (explicit cast)
     if (srcType->isIntegerTy(32) && destType->isIntegerTy(16))
       return b().CreateTrunc(val, destType, "narrow_i32_to_u16");
     if (srcType->isIntegerTy(32) && destType->isIntegerTy(8))
       return b().CreateTrunc(val, destType, "narrow_i32_to_u8");
+
     if (srcType->isIntegerTy(16) && destType->isIntegerTy(8))
       return b().CreateTrunc(val, destType, "narrow_u16_to_u8");
 
@@ -124,6 +179,12 @@ public:
   void visit(const AST::IntLiteral &node) override {
     currentValue =
         llvm::ConstantInt::get(llvm::Type::getInt32Ty(ctx()), node.value, true);
+  }
+
+  void visit(const AST::FloatLiteral &node) override {
+    // Generate as f32 by default
+    currentValue =
+        llvm::ConstantFP::get(llvm::Type::getFloatTy(ctx()), node.value);
   }
 
   void visit(const AST::BoolLiteral &node) override {
@@ -159,6 +220,35 @@ public:
     currentValue = nullptr;
   }
 
+  void visit(const AST::StructLiteral &node) override {
+    auto it = structTypes.find(node.typeName);
+    if (it == structTypes.end()) {
+      bridge.error("Unknown struct type '" + node.typeName + "'", node.loc);
+      currentValue = nullptr;
+      return;
+    }
+    auto *st = it->second.first;
+    const auto &fieldNames = it->second.second;
+
+    // Build a map of field name → value so order in literal doesn't matter
+    std::unordered_map<std::string, llvm::Value *> fieldVals;
+    for (auto &[name, expr] : node.fields) {
+      expr->accept(*this);
+      fieldVals[name] = currentValue;
+    }
+
+    llvm::Value *agg = llvm::UndefValue::get(st);
+    for (unsigned i = 0; i < fieldNames.size(); i++) {
+      auto valIt = fieldVals.find(fieldNames[i]);
+      if (valIt == fieldVals.end() || !valIt->second)
+        continue;
+      llvm::Type *expectedType = st->getElementType(i);
+      llvm::Value *val = castIfNeeded(valIt->second, expectedType);
+      agg = b().CreateInsertValue(agg, val, i);
+    }
+    currentValue = agg;
+  }
+
   void visit(const AST::Identifier &node) override {
     auto varOpt = bridge.lookupVar(node.name);
     if (!varOpt) {
@@ -179,66 +269,104 @@ public:
       return;
 
     // IMPLICIT WIDENING BEFORE MATH
+    auto typeIsUnsigned = [](llvm::Type *t) -> bool {
+      return t->isIntegerTy(8) || t->isIntegerTy(16);
+    };
+
     auto widenToCommon = [&](llvm::Value *&l, llvm::Value *&r) {
       llvm::Type *lt = l->getType(), *rt = r->getType();
       if (lt == rt)
         return;
-      // Always widen the narrower side to the wider type
+
+      bool lFloat = lt->isFloatingPointTy();
+      bool rFloat = rt->isFloatingPointTy();
+
+      if (lFloat && !rFloat)
+        r = castIfNeeded(r, lt);
+      else if (!lFloat && rFloat)
+        l = castIfNeeded(l, rt);
+      else if (lFloat && rFloat) {
+        if (lt->isFloatTy())
+          l = b().CreateFPExt(l, rt, "widen");
+        else
+          r = b().CreateFPExt(r, lt, "widen");
+      }
+
       if (lt->isIntegerTy() && rt->isIntegerTy()) {
         if (lt->getIntegerBitWidth() < rt->getIntegerBitWidth())
-          l = b().CreateZExt(l, rt, "widen");
+          l = typeIsUnsigned(lt) ? b().CreateZExt(l, rt, "widen")
+                                 : b().CreateSExt(l, rt, "widen");
         else
-          r = b().CreateZExt(r, lt, "widen");
+          r = typeIsUnsigned(rt) ? b().CreateZExt(r, lt, "widen")
+                                 : b().CreateSExt(r, lt, "widen");
       }
     };
     widenToCommon(lhs, rhs);
-    bool isUnsigned =
-        lhs->getType()->isIntegerTy(8) || lhs->getType()->isIntegerTy(16);
+    bool isFloat = lhs->getType()->isFloatingPointTy();
+    bool isUnsigned = typeIsUnsigned(lhs->getType());
 
     switch (node.op) {
     case TokenType::PLUS:
-      currentValue = b().CreateAdd(lhs, rhs, "add");
+      currentValue = isFloat ? b().CreateFAdd(lhs, rhs, "fadd")
+                             : b().CreateAdd(lhs, rhs, "add");
       break;
     case TokenType::MINUS:
-      currentValue = b().CreateSub(lhs, rhs, "sub");
+      currentValue = isFloat ? b().CreateFSub(lhs, rhs, "fsub")
+                             : b().CreateSub(lhs, rhs, "sub");
       break;
     case TokenType::STAR:
-      currentValue = b().CreateMul(lhs, rhs, "mul");
+      currentValue = isFloat ? b().CreateFMul(lhs, rhs, "fmul")
+                             : b().CreateMul(lhs, rhs, "mul");
       break;
     case TokenType::PERCENT:
-      currentValue = isUnsigned ? b().CreateURem(lhs, rhs, "mod")
-                                : b().CreateSRem(lhs, rhs, "mod");
+      currentValue = isFloat ? b().CreateFRem(lhs, rhs, "fmod")
+                             : (isUnsigned ? b().CreateURem(lhs, rhs, "mod")
+                                           : b().CreateSRem(lhs, rhs, "mod"));
       break;
     case TokenType::SLASH:
       if (auto *c = llvm::dyn_cast<llvm::ConstantInt>(rhs); c && c->isZero()) {
         bridge.error("Division by zero", node.loc);
         currentValue = constI32(0);
       } else {
-        currentValue = isUnsigned ? b().CreateUDiv(lhs, rhs, "div")
-                                  : b().CreateSDiv(lhs, rhs, "div");
+        if (isFloat) {
+          currentValue = b().CreateFDiv(lhs, rhs, "fdiv");
+        } else {
+          currentValue = isUnsigned ? b().CreateUDiv(lhs, rhs, "div")
+                                    : b().CreateSDiv(lhs, rhs, "div");
+        }
       }
       break;
     case TokenType::LESS:
-      currentValue = isUnsigned ? b().CreateICmpULT(lhs, rhs, "cmp")
-                                : b().CreateICmpSLT(lhs, rhs, "cmp");
+      currentValue = isFloat
+                         ? b().CreateFCmpOLT(lhs, rhs, "cmp")
+                         : (isUnsigned ? b().CreateICmpULT(lhs, rhs, "cmp")
+                                       : b().CreateICmpSLT(lhs, rhs, "cmp"));
       break;
     case TokenType::GREATER:
-      currentValue = isUnsigned ? b().CreateICmpUGT(lhs, rhs, "cmp")
-                                : b().CreateICmpSGT(lhs, rhs, "cmp");
+      currentValue = isFloat
+                         ? b().CreateFCmpOGT(lhs, rhs, "cmp")
+                         : (isUnsigned ? b().CreateICmpUGT(lhs, rhs, "cmp")
+                                       : b().CreateICmpSGT(lhs, rhs, "cmp"));
       break;
     case TokenType::LESS_EQ:
-      currentValue = isUnsigned ? b().CreateICmpULE(lhs, rhs, "cmp")
-                                : b().CreateICmpSLE(lhs, rhs, "cmp");
+      currentValue = isFloat
+                         ? b().CreateFCmpOLE(lhs, rhs, "cmp")
+                         : (isUnsigned ? b().CreateICmpULE(lhs, rhs, "cmp")
+                                       : b().CreateICmpSLE(lhs, rhs, "cmp"));
       break;
     case TokenType::GREATER_EQ:
-      currentValue = isUnsigned ? b().CreateICmpUGE(lhs, rhs, "cmp")
-                                : b().CreateICmpSGE(lhs, rhs, "cmp");
+      currentValue = isFloat
+                         ? b().CreateFCmpOGE(lhs, rhs, "cmp")
+                         : (isUnsigned ? b().CreateICmpUGE(lhs, rhs, "cmp")
+                                       : b().CreateICmpSGE(lhs, rhs, "cmp"));
       break;
     case TokenType::EQ_EQ:
-      currentValue = b().CreateICmpEQ(lhs, rhs, "cmp");
+      currentValue = isFloat ? b().CreateFCmpOEQ(lhs, rhs, "cmp")
+                             : b().CreateICmpEQ(lhs, rhs, "cmp");
       break;
     case TokenType::NOT_EQ:
-      currentValue = b().CreateICmpNE(lhs, rhs, "cmp");
+      currentValue = isFloat ? b().CreateFCmpONE(lhs, rhs, "cmp")
+                             : b().CreateICmpNE(lhs, rhs, "cmp");
       break;
     case TokenType::AND:
       currentValue = b().CreateAnd(lhs, rhs, "and");
@@ -269,21 +397,24 @@ public:
 
       llvm::Value *argVal = currentValue;
 
+      // Extract raw C pointers for extern functions BEFORE checking parameters
+      if (fn->isDeclaration() && argVal->getType()->isStructTy()) {
+        argVal = b().CreateExtractValue(argVal, 0, "raw_c_str");
+      }
+
       // If the argument corresponds to a defined parameter, cast it
       if (i < fnType->getNumParams()) {
         llvm::Type *expectedType = fnType->getParamType(i);
         argVal = castIfNeeded(argVal, expectedType);
       } else {
-        // If this is an extern function (has no body in Hydrolox) and we are
-        // passing a struct (str/string)
-        if (fn->isDeclaration() && argVal->getType()->isStructTy()) {
-          // Extract the raw pointer (Index 0) to pass to C
-          argVal = b().CreateExtractValue(argVal, 0, "raw_c_str");
-        } else if (argVal->getType()->isIntegerTy(8) ||
-                   argVal->getType()->isIntegerTy(16)) {
+        if (argVal->getType()->isIntegerTy(8) ||
+            argVal->getType()->isIntegerTy(16)) {
           // C vararg promotion (u8/u16 -> i32)
           argVal = b().CreateZExt(argVal, llvm::Type::getInt32Ty(ctx()),
                                   "vararg_prom");
+        } else if (argVal->getType()->isFloatTy()) {
+          argVal = b().CreateFPExt(argVal, llvm::Type::getDoubleTy(ctx()),
+                                   "vararg_fp_prom");
         }
       }
 
@@ -335,6 +466,84 @@ public:
     // castIfNeeded automatically issues the correct CreateTrunc or CreateZExt
     // instruction!
     currentValue = castIfNeeded(currentValue, destType);
+  }
+
+  void visit(const AST::MemberAccessExpr &node) override {
+    auto *ident = dynamic_cast<const AST::Identifier *>(node.object.get());
+    if (!ident) {
+      bridge.error("Expected variable on left of '.'", node.loc);
+      currentValue = nullptr;
+      return;
+    }
+    auto structIt = varToStructType.find(ident->name);
+    if (structIt == varToStructType.end()) {
+      bridge.error("'" + ident->name + "' is not a struct", node.loc);
+      currentValue = nullptr;
+      return;
+    }
+    auto typeIt = structTypes.find(structIt->second);
+    if (typeIt == structTypes.end())
+      return;
+
+    auto *st = typeIt->second.first;
+    const auto &fieldNames = typeIt->second.second;
+    auto fieldIt = std::find(fieldNames.begin(), fieldNames.end(), node.field);
+    if (fieldIt == fieldNames.end()) {
+      bridge.error("No field '" + node.field + "'", node.loc);
+      currentValue = nullptr;
+      return;
+    }
+    unsigned idx = static_cast<unsigned>(fieldIt - fieldNames.begin());
+
+    auto allocaIt = structVarAllocas.find(ident->name);
+    if (allocaIt == structVarAllocas.end()) {
+      bridge.error("Struct variable '" + ident->name + "' has no alloca",
+                   node.loc);
+      currentValue = nullptr;
+      return;
+    }
+
+    llvm::Value *gep = b().CreateStructGEP(st, allocaIt->second, idx,
+                                           ident->name + "." + node.field);
+    currentValue =
+        b().CreateLoad(st->getElementType(idx), gep, node.field + "_val");
+  }
+
+  void visit(const AST::MemberAssignExpr &node) override {
+    auto structIt = varToStructType.find(node.objectName);
+    if (structIt == varToStructType.end()) {
+      bridge.error("'" + node.objectName + "' is not a struct", node.loc);
+      return;
+    }
+    auto typeIt = structTypes.find(structIt->second);
+    if (typeIt == structTypes.end())
+      return;
+
+    auto *st = typeIt->second.first;
+    const auto &fieldNames = typeIt->second.second;
+    auto fieldIt = std::find(fieldNames.begin(), fieldNames.end(), node.field);
+    if (fieldIt == fieldNames.end()) {
+      bridge.error("No field '" + node.field + "'", node.loc);
+      return;
+    }
+    unsigned idx = static_cast<unsigned>(fieldIt - fieldNames.begin());
+
+    node.value->accept(*this);
+    if (!currentValue)
+      return;
+
+    auto allocaIt = structVarAllocas.find(node.objectName);
+    if (allocaIt == structVarAllocas.end()) {
+      bridge.error("Struct variable '" + node.objectName + "' has no alloca",
+                   node.loc);
+      return;
+    }
+
+    llvm::Value *gep = b().CreateStructGEP(st, allocaIt->second, idx,
+                                           node.objectName + "." + node.field);
+    llvm::Type *fieldType = st->getElementType(idx);
+    currentValue = castIfNeeded(currentValue, fieldType);
+    b().CreateStore(currentValue, gep);
   }
 
   void visit(const AST::IfStmt &node) override {
@@ -441,35 +650,52 @@ public:
   }
 
   void visit(const AST::VarDecl &node) override {
-    if (node.isArray()) {
-      llvm::Type *elemType = toLLVMType(node.type);
-      size_t size = *node.arraySize;
-      llvm::ArrayType *arrType = llvm::ArrayType::get(elemType, size);
-      llvm::Value *alloca = bridge.emitAlloca(arrType, node.name);
+    if (node.type.isStruct()) {
+      const std::string &structName = std::get<StructType>(node.type.data).name;
+      auto typeIt = structTypes.find(structName);
+      if (typeIt == structTypes.end())
+        return;
+
+      auto *st = typeIt->second.first;
+      node.initializer->accept(*this);
+      if (!currentValue)
+        return;
+
+      llvm::Value *alloca = bridge.emitAlloca(st, node.name);
+      b().CreateStore(currentValue, alloca);
+      bridge.defineVar(node.name, {alloca, st}, node.loc);
+      varToStructType[node.name] = structName;
+      structVarAllocas[node.name] = alloca;
+      return;
+    }
+    if (node.type.isArray()) {
+      const auto &arrType = std::get<ArrayType>(node.type.data);
+      llvm::Type *elemType = toLLVMType(*arrType.base);
+      size_t size = arrType.size;
+      llvm::ArrayType *llvmArrType = llvm::ArrayType::get(elemType, size);
+      llvm::Value *alloca = bridge.emitAlloca(llvmArrType, node.name);
 
       arrays.define(node.name, {alloca, elemType, size});
       node.initializer->accept(*this);
 
       for (size_t i = 0; i < lastArrayElements.size() && i < size; i++) {
         llvm::Value *gep = b().CreateGEP(
-            arrType, alloca, {constI32(0), constI32(static_cast<int>(i))},
+            llvmArrType, alloca, {constI32(0), constI32(static_cast<int>(i))},
             node.name + "_init_" + std::to_string(i));
         b().CreateStore(lastArrayElements[i], gep);
       }
-    } else {
-      node.initializer->accept(*this);
-      if (!currentValue)
-        return;
-
-      llvm::Type *varType = toLLVMType(node.type);
-
-      // Automagically fix the type!
-      currentValue = castIfNeeded(currentValue, varType);
-
-      llvm::Value *alloca = bridge.emitAlloca(varType, node.name);
-      b().CreateStore(currentValue, alloca);
-      bridge.defineVar(node.name, {alloca, varType}, node.loc);
+      return;
     }
+
+    node.initializer->accept(*this);
+    if (!currentValue)
+      return;
+
+    llvm::Type *varType = toLLVMType(node.type);
+    currentValue = castIfNeeded(currentValue, varType);
+    llvm::Value *alloca = bridge.emitAlloca(varType, node.name);
+    b().CreateStore(currentValue, alloca);
+    bridge.defineVar(node.name, {alloca, varType}, node.loc);
   }
 
   void visit(const AST::FunctionDecl &node) override {
@@ -499,16 +725,33 @@ public:
   void visit(const AST::ExternDecl &node) override {
     llvm::Type *retType = toLLVMType(node.returnType);
     std::vector<llvm::Type *> argTypes;
-    for (auto t : node.paramTypes) {
+    for (const auto &t : node.paramTypes) {
+      if (t.isPrimitive()) {
+        TokenType tag = std::get<PrimitiveType>(t.data).tag;
+        if (tag == TokenType::STR || tag == TokenType::STRING) {
+          argTypes.push_back(llvm::PointerType::getUnqual(ctx()));
+          continue;
+        }
+      }
       argTypes.push_back(toLLVMType(t));
     }
 
     llvm::FunctionType *fnType =
         llvm::FunctionType::get(retType, argTypes, node.isVariadic);
 
-    // Create the function with ExternalLinkage, meaning "The Linker will find
-    // this later!"
+    // Create the function with ExternalLinkage
     llvm::Function::Create(fnType, llvm::Function::ExternalLinkage, node.name,
                            bridge.getModule());
+  }
+
+  void visit(const AST::StructDecl &node) override {
+    std::vector<llvm::Type *> fieldTypes;
+    std::vector<std::string> fieldNames;
+    for (auto &[name, type] : node.fields) {
+      fieldTypes.push_back(toLLVMType(type));
+      fieldNames.push_back(name);
+    }
+    auto *st = llvm::StructType::create(ctx(), fieldTypes, node.name);
+    structTypes[node.name] = {st, std::move(fieldNames)};
   }
 };
