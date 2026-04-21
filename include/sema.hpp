@@ -6,7 +6,7 @@
 #include <string>
 
 class SemanticAnalyzer : public elpc::Sema, public AST::ASTVisitor {
-  // Symbol table now natively tracks Primitives, Arrays, AND Structs!
+  // Symbol table natively tracks Primitives, Arrays, and Structs
   elpc::SymbolTable<std::string, TypeInfo> symbols;
 
   std::optional<TypeInfo> currentExprType;
@@ -39,7 +39,7 @@ public:
     currentExprType = TypeInfo{PrimitiveType{TokenType::I32}};
   }
   void visit(const AST::FloatLiteral &node) override {
-    currentExprType = TypeInfo{PrimitiveType{TokenType::F32}};
+    currentExprType = TypeInfo{PrimitiveType{TokenType::F64}};
   }
   void visit(const AST::BoolLiteral &node) override {
     currentExprType = TypeInfo{PrimitiveType{TokenType::BOOL}};
@@ -170,7 +170,7 @@ public:
     node.array->accept(*this);
     auto arrayType = currentExprType;
 
-    if (!arrayType || !arrayType->isArray()) {
+    if (!arrayType || !arrayType->isArray() && !arrayType->isVector()) {
       error("Cannot index non-array type", node.loc);
       return;
     }
@@ -178,9 +178,13 @@ public:
     node.index->accept(*this);
     if (!currentExprType || !currentExprType->isPrimitive() ||
         std::get<PrimitiveType>(currentExprType->data).tag != TokenType::I32)
-      error("Array index must be i32", node.loc);
+      error("Array index must be an integer", node.loc);
 
-    currentExprType = *std::get<ArrayType>(arrayType->data).base;
+    if (arrayType->isVector()) {
+      currentExprType = *std::get<VectorType>(arrayType->data).base;
+    } else {
+      currentExprType = *std::get<ArrayType>(arrayType->data).base;
+    }
   }
 
   void visit(const AST::CastExpr &node) override {
@@ -307,6 +311,14 @@ public:
 private:
   std::optional<TypeInfo> commonNumericType(const TypeInfo &a,
                                             const TypeInfo &b) {
+    if (a.isVector() && b.isVector()) {
+      auto &va = std::get<VectorType>(a.data);
+      auto &vb = std::get<VectorType>(b.data);
+      if (va.size == vb.size && *va.base == *vb.base)
+        return a;
+      return std::nullopt;
+    }
+
     if (!a.isPrimitive() || !b.isPrimitive())
       return std::nullopt;
     TokenType ta = std::get<PrimitiveType>(a.data).tag;
@@ -335,6 +347,14 @@ private:
   }
 
   bool isImplicitWidening(const TypeInfo &from, const TypeInfo &to) {
+    if (from.isArray() && to.isVector()) {
+      auto &arr = std::get<ArrayType>(from.data);
+      auto &vec = std::get<VectorType>(to.data);
+      if (arr.size == vec.size && *arr.base == *vec.base ||
+          isImplicitWidening(*arr.base, *vec.base))
+        return true;
+    }
+
     if (!from.isPrimitive() || !to.isPrimitive())
       return false;
     TokenType f = std::get<PrimitiveType>(from.data).tag;

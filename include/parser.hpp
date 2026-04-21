@@ -1,8 +1,10 @@
 #pragma once
 
+#include "types.hpp"
 #include <ast.hpp>
 #include <elpc/parser/prattParser.hpp>
 #include <memory>
+#include <stdexcept>
 
 class HydroloxParser
     : public elpc::PrattParser<TokenType, std::unique_ptr<AST::Expr>> {
@@ -511,6 +513,98 @@ private:
     if (check(TokenType::IDENT)) {
       auto nameTok = consume();
       return TypeInfo{StructType{nameTok.lexeme}};
+    }
+
+    if (peek().is(TokenType::VEC)) {
+      consume(); // Eat the vec
+      expect(TokenType::LESS, "Expected '<' after vec");
+      auto sizeTok = expect(TokenType::INT_LIT, "Expected vector size");
+      std::optional<int> size = sizeTok.toInt();
+      if (!size) {
+        throw std::runtime_error("[hydrolox]: failed to parse vector size");
+      }
+
+      expect(TokenType::COMMA, "Expected ',' after vector size");
+      TypeInfo innerType = parseType();
+      expect(TokenType::GREATER, "Expected '>' after vector type");
+
+      TypeInfo vecType = TypeInfo{
+          VectorType{std::make_shared<TypeInfo>(innerType), size.value()}};
+
+      if (match(TokenType::LEFT_SQ_BRACE)) {
+        auto arrSizeTok = expect(TokenType::INT_LIT, "Expected array size.");
+        std::optional<int> arrSize = arrSizeTok.toInt();
+        if (!arrSize) {
+          throw std::runtime_error(
+              "[hydrolox]: failed to parse array size for vec");
+        }
+        expect(TokenType::RIGHT_SQ_BRACE, "Expected ']' after array size.");
+        return TypeInfo{
+            ArrayType{std::make_shared<TypeInfo>(vecType), arrSize.value()}};
+      }
+      return vecType;
+    }
+
+    if (peek().isOneOf(TokenType::VEC2, TokenType::VEC3, TokenType::VEC4,
+                       TokenType::DVEC2, TokenType::DVEC3, TokenType::DVEC4,
+                       TokenType::IVEC2, TokenType::IVEC3, TokenType::IVEC4)) {
+      TokenType t = consume().type;
+      int size = 0;
+      TokenType baseTag;
+
+      switch (t) {
+      case TokenType::VEC2:
+        size = 2;
+        baseTag = TokenType::F32;
+        break;
+      case TokenType::VEC3:
+        size = 3;
+        baseTag = TokenType::F32;
+        break;
+      case TokenType::VEC4:
+        size = 4;
+        baseTag = TokenType::F32;
+        break;
+      case TokenType::DVEC2:
+        size = 2;
+        baseTag = TokenType::F64;
+        break;
+      case TokenType::DVEC3:
+        size = 3;
+        baseTag = TokenType::F64;
+        break;
+      case TokenType::DVEC4:
+        size = 4;
+        baseTag = TokenType::F64;
+        break;
+      case TokenType::IVEC2:
+        size = 2;
+        baseTag = TokenType::I32;
+        break;
+      case TokenType::IVEC3:
+        size = 3;
+        baseTag = TokenType::I32;
+        break;
+      case TokenType::IVEC4:
+        size = 4;
+        baseTag = TokenType::I32;
+        break;
+      default:
+        break;
+      }
+
+      TypeInfo innerType = TypeInfo{PrimitiveType{baseTag}};
+      TypeInfo vecType =
+          TypeInfo{VectorType{std::make_shared<TypeInfo>(innerType), size}};
+
+      if (match(TokenType::LEFT_SQ_BRACE)) {
+        auto arrSizeTok = expect(TokenType::INT_LIT, "Expected array size.");
+        int arrSize = std::stoi(arrSizeTok.lexeme);
+        expect(TokenType::RIGHT_SQ_BRACE, "Expected ']' after array size.");
+        return TypeInfo{
+            ArrayType{std::make_shared<TypeInfo>(vecType), arrSize}};
+      }
+      return vecType;
     }
 
     auto typeTok = expectOneOf("Expected type.", TokenType::U8, TokenType::U16,

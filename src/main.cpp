@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <llvm/TargetParser/Triple.h>
 #include <sstream>
 #include <string>
 
@@ -15,10 +16,16 @@
 #include <llvm/Analysis/LoopAnalysisManager.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/MC/MCSubtargetInfo.h>
+#include <llvm/MC/TargetRegistry.h>
 #include <llvm/Passes/OptimizationLevel.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/FileSystem.h>
+#include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Target/TargetMachine.h>
+#include <llvm/Target/TargetOptions.h>
+#include <llvm/TargetParser/Host.h>
 #endif
 
 struct CompilerOptions {
@@ -198,8 +205,37 @@ bool compile(const CompilerOptions &opts) {
     }
 
 #ifdef ELPC_ENABLE_LLVM
+    llvm::InitializeNativeTarget();
+    llvm::InitializeNativeTargetAsmPrinter();
     llvm::LLVMContext ctx;
     auto mod = std::make_unique<llvm::Module>("hydrolox_core", ctx);
+
+    llvm::Triple targetTriple =
+        llvm::Triple(llvm::sys::getDefaultTargetTriple());
+    mod->setTargetTriple(targetTriple);
+
+    std::string targetError;
+    auto target = llvm::TargetRegistry::lookupTarget(targetTriple, targetError);
+    if (!target) {
+      std::cerr << "[hydrolox] error: " << targetError << "\n";
+      return false;
+    }
+
+    llvm::TargetOptions targetOpts;
+    llvm::SubtargetFeatures features;
+    llvm::StringMap<bool> hostFeatures = llvm::sys::getHostCPUFeatures();
+
+    for (const auto &f : hostFeatures) {
+      if (f.second)
+        features.AddFeature(f.first());
+    }
+
+    auto TM = std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(
+        targetTriple, llvm::sys::getHostCPUName(), features.getString(),
+        targetOpts, llvm::Reloc::PIC_));
+
+    mod->setDataLayout(TM->createDataLayout());
+
     elpc::LLVMBridge bridge(ctx, *mod, diag);
     LLVMGenerator codegen(bridge);
 
@@ -217,7 +253,7 @@ bool compile(const CompilerOptions &opts) {
       llvm::FunctionAnalysisManager FAM;
       llvm::CGSCCAnalysisManager CGAM;
       llvm::ModuleAnalysisManager MAM;
-      llvm::PassBuilder PB;
+      llvm::PassBuilder PB(TM.get());
 
       PB.registerModuleAnalyses(MAM);
       PB.registerCGSCCAnalyses(CGAM);
@@ -242,7 +278,17 @@ bool compile(const CompilerOptions &opts) {
       return true;
     }
 
-    bridge.writeObject(opts.outputPath);
+    std::error_code EC;
+    llvm::raw_fd_ostream dest(opts.outputPath, EC, llvm::sys::fs::OF_None);
+    if (EC) {
+      std::cerr << "[hydrolox] error: " << EC.message() << "\n";
+      return false;
+    }
+    llvm::legacy::PassManager codegenPM;
+    TM->addPassesToEmitFile(codegenPM, dest, nullptr,
+                            llvm::CodeGenFileType::ObjectFile);
+    codegenPM.run(*mod);
+
     if (diag.hasErrors()) {
       diag.reportDiagnostics(std::cerr);
       return false;

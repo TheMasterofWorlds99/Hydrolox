@@ -27,6 +27,18 @@ enum class TokenType {
   STR,
   STRUCT_TYPE,
 
+  // VECTORS
+  VEC,
+  VEC2,
+  VEC3,
+  VEC4,
+  DVEC2,
+  DVEC3,
+  DVEC4,
+  IVEC2,
+  IVEC3,
+  IVEC4,
+
   // LITERALS (2, 3.141, 3.1i, etc)
   INT_LIT,
   FLOAT_LIT,

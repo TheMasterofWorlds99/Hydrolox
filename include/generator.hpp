@@ -4,6 +4,7 @@
 #include <elpc/elpc.hpp>
 #include <elpc/ir/llvmBridge.hpp>
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
@@ -121,8 +122,11 @@ class LLVMGenerator : public AST::ASTVisitor {
     if (srcType == destType)
       return val;
 
-    bool srcIsFloat = srcType->isFloatingPointTy();
-    bool destIsFloat = destType->isFloatingPointTy();
+    llvm::Type *srcScalar = srcType->getScalarType();
+    llvm::Type *destScalar = destType->getScalarType();
+
+    bool srcIsFloat = srcScalar->isFloatingPointTy();
+    bool destIsFloat = destScalar->isFloatingPointTy();
 
     // Float <-> Float
     if (srcIsFloat && destIsFloat) {
@@ -184,7 +188,7 @@ public:
   void visit(const AST::FloatLiteral &node) override {
     // Generate as f32 by default
     currentValue =
-        llvm::ConstantFP::get(llvm::Type::getFloatTy(ctx()), node.value);
+        llvm::ConstantFP::get(llvm::Type::getDoubleTy(ctx()), node.value);
   }
 
   void visit(const AST::BoolLiteral &node) override {
@@ -302,8 +306,8 @@ public:
       }
     };
     widenToCommon(lhs, rhs);
-    bool isFloat = lhs->getType()->isFloatingPointTy();
-    bool isUnsigned = typeIsUnsigned(lhs->getType());
+    bool isFloat = lhs->getType()->getScalarType()->isFloatingPointTy();
+    bool isUnsigned = typeIsUnsigned(lhs->getType()->getScalarType());
 
     switch (node.op) {
     case TokenType::PLUS:
@@ -426,17 +430,39 @@ public:
   void visit(const AST::AssignExpr &node) override {
     node.value->accept(*this);
     auto varOpt = bridge.lookupVar(node.name);
-    if (!varOpt || !currentValue)
+    if (!varOpt)
       return;
 
-    // Automagically fix the type!
-    currentValue = castIfNeeded(currentValue, varOpt->type);
-    b().CreateStore(currentValue, varOpt->ptr);
+    llvm::Value *storeVal = currentValue;
+
+    if (!storeVal && varOpt->type->isVectorTy()) {
+      storeVal = llvm::UndefValue::get(varOpt->type);
+      for (size_t i = 0; i < lastArrayElements.size(); i++) {
+        storeVal = b().CreateInsertElement(storeVal, lastArrayElements[i],
+                                           constI32(i), "vec_assign");
+      }
+    }
+
+    if (storeVal) {
+      storeVal = castIfNeeded(storeVal, varOpt->type);
+      b().CreateStore(storeVal, varOpt->ptr);
+    }
   }
 
   void visit(const AST::IndexExpr &node) override {
     auto *ident = dynamic_cast<const AST::Identifier *>(node.array.get());
-    if (!ident) {
+    if (ident) {
+      auto varOpt = bridge.lookupVar(ident->name);
+      if (varOpt && varOpt->type->isVectorTy()) {
+        node.index->accept(*this);
+        llvm::Value *idx = currentValue;
+        llvm::Value *vec =
+            b().CreateLoad(varOpt->type, varOpt->ptr, ident->name + "_val");
+        currentValue =
+            b().CreateExtractElement(vec, idx, ident->name + "_elem");
+        return;
+      }
+    } else {
       bridge.error("Can only index named arrays", node.loc);
       currentValue = nullptr;
       return;
@@ -464,7 +490,7 @@ public:
     llvm::Type *destType = toLLVMType(node.targetType);
 
     // castIfNeeded automatically issues the correct CreateTrunc or CreateZExt
-    // instruction!
+    // instruction
     currentValue = castIfNeeded(currentValue, destType);
   }
 
@@ -668,6 +694,30 @@ public:
       structVarAllocas[node.name] = alloca;
       return;
     }
+
+    if (node.type.isVector()) {
+      llvm::Type *vecLLVMType = toLLVMType(node.type);
+      llvm::Value *vecVal = llvm::UndefValue::get(vecLLVMType);
+
+      node.initializer->accept(*this);
+
+      // If it was initialized by another vector (v2 = v1)
+      if (currentValue && currentValue->getType()->isVectorTy()) {
+        vecVal = currentValue;
+      } else {
+        // It was initialized by an array literal[1.0, 2.0, 3.0]
+        for (size_t i = 0; i < lastArrayElements.size(); i++) {
+          vecVal = b().CreateInsertElement(vecVal, lastArrayElements[i],
+                                           constI32(i), "vec_init");
+        }
+      }
+
+      llvm::Value *alloca = bridge.emitAlloca(vecLLVMType, node.name);
+      b().CreateStore(vecVal, alloca);
+      bridge.defineVar(node.name, {alloca, vecLLVMType}, node.loc);
+      return;
+    }
+
     if (node.type.isArray()) {
       const auto &arrType = std::get<ArrayType>(node.type.data);
       llvm::Type *elemType = toLLVMType(*arrType.base);

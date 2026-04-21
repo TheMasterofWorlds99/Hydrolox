@@ -27,6 +27,18 @@ inline elpc::Lexer<TokenType> GenerateLexer(const std::string &src) {
   lexer.addRule(TokenType::STRING, "\\bstring\\b");
   lexer.addRule(TokenType::STR, "\\bstr\\b");
 
+  // VECTORS
+  lexer.addRule(TokenType::VEC, "\\bvec\\b");
+  lexer.addRule(TokenType::VEC2, "\\bvec2\\b");
+  lexer.addRule(TokenType::VEC3, "\\bvec3\\b");
+  lexer.addRule(TokenType::VEC4, "\\bvec4\\b");
+  lexer.addRule(TokenType::DVEC2, "\\bdvec2\\b");
+  lexer.addRule(TokenType::DVEC3, "\\bdvec3\\b");
+  lexer.addRule(TokenType::DVEC4, "\\bdvec4\\b");
+  lexer.addRule(TokenType::IVEC2, "\\bivec2\\b");
+  lexer.addRule(TokenType::IVEC3, "\\bivec3\\b");
+  lexer.addRule(TokenType::IVEC4, "\\bivec4\\b");
+
   // Literals
   lexer.addRule(TokenType::INT_LIT, "\\b[0-9]+\\b");
   lexer.addRule(TokenType::FLOAT_LIT, "\\b[0-9]+\\.[0-9]+\\b");
