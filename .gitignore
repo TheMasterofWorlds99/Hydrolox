@@ -9,6 +9,9 @@ output.o
 .idea/
 *.swp
 
+#IDK, other stuff
+.cache/
+
 # Compiler output
 *.ll
 *.s
